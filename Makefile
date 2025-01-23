@@ -18,6 +18,10 @@ docker-run: ## Run Docker image
 docker-push: ## Push image to Docker Hub
 	docker push $(IMAGE_NAME)
 
+.PHONY: clean
+clean: ## Clean up build artifacts
+	cargo clean
+
 .PHONY: build
 build: ## Build Rust code locally
 	cargo build
@@ -36,6 +40,7 @@ docs: ## Generate and show documentation
 
 .PHONY: lint
 lint: ## Run linter
+	cargo fmt --all -- --check
 	cargo clippy --all-targets --all-features -- -D warnings
 
 .PHONY: test
@@ -50,4 +55,6 @@ doc: ## Open documentation
 
 .PHONY: screencast
 screencast: ## Create a screencast for the docs
-	svg-term --command 'assets/screencast.sh' --out 'assets/screencast.svg' --width 100 --padding 10 --window
+	termsvg rec --command=assets/screencast.sh recording.asc 
+	termsvg export --minify recording.asc --output=assets/screencast.svg
+	rm recording.asc

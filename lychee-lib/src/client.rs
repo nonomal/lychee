@@ -13,27 +13,28 @@
     clippy::default_trait_access,
     clippy::used_underscore_binding
 )]
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
-use check_if_email_exists::{check_email, CheckEmailInput, Reachable};
 use http::{
     header::{HeaderMap, HeaderValue},
     StatusCode,
 };
-use log::debug;
+use log::{debug, warn};
 use octocrab::Octocrab;
 use regex::RegexSet;
-use reqwest::{header, Url};
+use reqwest::{header, redirect};
+use reqwest_cookie_store::CookieStoreMutex;
 use secrecy::{ExposeSecret, SecretString};
 use typed_builder::TypedBuilder;
 
 use crate::{
+    chain::RequestChain,
+    checker::file::FileChecker,
+    checker::{mail::MailChecker, website::WebsiteChecker},
     filter::{Excludes, Filter, Includes},
-    quirks::Quirks,
     remap::Remaps,
-    retry::RetryExt,
-    types::{mail, uri::github::GithubUri},
-    ErrorKind, Request, Response, Result, Status, Uri,
+    utils::fragment_checker::FragmentChecker,
+    Base, BasicAuthCredentials, ErrorKind, Request, Response, Result, Status, Uri,
 };
 
 /// Default number of redirects before a request is deemed as failed, 5.
@@ -87,6 +88,9 @@ pub struct ClientBuilder {
     /// the same URI are allowed, so it is up to the library user's discretion to
     /// make sure rules don't conflict with each other.
     remaps: Option<Remaps>,
+
+    /// Automatically append file extensions to `file://` URIs as needed
+    fallback_extensions: Vec<String>,
 
     /// Links matching this set of regular expressions are **always** checked.
     ///
@@ -173,8 +177,8 @@ pub struct ClientBuilder {
     /// [IETF RFC 4291 section 2.5.3]: https://tools.ietf.org/html/rfc4291#section-2.5.3
     exclude_loopback_ips: bool,
 
-    /// When `true`, don't check mail addresses.
-    exclude_mail: bool,
+    /// When `true`, check mail addresses.
+    include_mail: bool,
 
     /// Maximum number of redirects per request before returning an error.
     ///
@@ -238,6 +242,12 @@ pub struct ClientBuilder {
     /// Response timeout per request in seconds.
     timeout: Option<Duration>,
 
+    /// Base for resolving paths.
+    ///
+    /// E.g. if the base is `/home/user/` and the path is `file.txt`, the
+    /// resolved path would be `/home/user/file.txt`.
+    base: Option<Base>,
+
     /// Initial time between retries of failed requests.
     ///
     /// Defaults to [`DEFAULT_RETRY_WAIT_TIME_SECS`].
@@ -259,6 +269,20 @@ pub struct ClientBuilder {
     /// It has no effect on non-HTTP schemes or if the URL doesn't support
     /// HTTPS.
     require_https: bool,
+
+    /// Cookie store used for requests.
+    ///
+    /// See <https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html#method.cookie_store>
+    cookie_jar: Option<Arc<CookieStoreMutex>>,
+
+    /// Enable the checking of fragments in links.
+    include_fragments: bool,
+
+    /// Requests run through this chain where each item in the chain
+    /// can modify the request. A chained item can also decide to exit
+    /// early and return a status, so that subsequent chain items are
+    /// skipped and the lychee-internal request chain is not activated.
+    plugin_request_chain: RequestChain,
 }
 
 impl Default for ClientBuilder {
@@ -279,7 +303,7 @@ impl ClientBuilder {
     /// - The reqwest client cannot be instantiated. This occurs if a TLS
     ///   backend cannot be initialized or the resolver fails to load the system
     ///   configuration. See [here].
-    /// - The Github client cannot be created. Since the implementation also
+    /// - The GitHub client cannot be created. Since the implementation also
     ///   uses reqwest under the hood, this errors in the same circumstances as
     ///   the last one.
     ///
@@ -305,29 +329,44 @@ impl ClientBuilder {
             HeaderValue::from_static("chunked"),
         );
 
-        let builder = reqwest::ClientBuilder::new()
+        // Custom redirect policy to enable logging of redirects.
+        let max_redirects = self.max_redirects;
+        let redirect_policy = redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() > max_redirects {
+                attempt.error("too many redirects")
+            } else {
+                debug!("Redirecting to {}", attempt.url());
+                attempt.follow()
+            }
+        });
+
+        let mut builder = reqwest::ClientBuilder::new()
             .gzip(true)
             .default_headers(headers)
             .danger_accept_invalid_certs(self.allow_insecure)
             .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT))
             .tcp_keepalive(Duration::from_secs(TCP_KEEPALIVE))
-            .redirect(reqwest::redirect::Policy::limited(self.max_redirects));
+            .redirect(redirect_policy);
 
-        let reqwest_client = (match self.timeout {
+        if let Some(cookie_jar) = self.cookie_jar {
+            builder = builder.cookie_provider(cookie_jar);
+        }
+
+        let reqwest_client = match self.timeout {
             Some(t) => builder.timeout(t),
             None => builder,
-        })
+        }
         .build()
         .map_err(ErrorKind::NetworkRequest)?;
 
         let github_client = match self.github_token.as_ref().map(ExposeSecret::expose_secret) {
             Some(token) if !token.is_empty() => Some(
                 Octocrab::builder()
-                    .personal_token(token.clone())
+                    .personal_token(token.to_string())
                     .build()
-                    // this is essentially the same reqwest::ClientBuilder::build error
+                    // this is essentially the same `reqwest::ClientBuilder::build` error
                     // see https://docs.rs/octocrab/0.18.1/src/octocrab/lib.rs.html#360-364
-                    .map_err(ErrorKind::BuildGithubClient)?,
+                    .map_err(|e: octocrab::Error| ErrorKind::BuildGithubClient(Box::new(e)))?,
             ),
             _ => None,
         };
@@ -341,22 +380,31 @@ impl ClientBuilder {
             exclude_private_ips: self.exclude_all_private || self.exclude_private_ips,
             exclude_link_local_ips: self.exclude_all_private || self.exclude_link_local_ips,
             exclude_loopback_ips: self.exclude_all_private || self.exclude_loopback_ips,
-            exclude_mail: self.exclude_mail,
+            include_mail: self.include_mail,
         };
 
-        let quirks = Quirks::default();
+        let website_checker = WebsiteChecker::new(
+            self.method,
+            self.retry_wait_time,
+            self.max_retries,
+            reqwest_client,
+            self.accepted,
+            github_client,
+            self.require_https,
+            self.plugin_request_chain,
+        );
 
         Ok(Client {
-            reqwest_client,
-            github_client,
             remaps: self.remaps,
             filter,
-            max_retries: self.max_retries,
-            retry_wait_time: self.retry_wait_time,
-            method: self.method,
-            accepted: self.accepted,
-            require_https: self.require_https,
-            quirks,
+            email_checker: MailChecker::new(),
+            website_checker,
+            file_checker: FileChecker::new(
+                self.base,
+                self.fallback_extensions,
+                self.include_fragments,
+            ),
+            fragment_checker: FragmentChecker::new(),
         })
     }
 }
@@ -367,42 +415,23 @@ impl ClientBuilder {
 /// options.
 #[derive(Debug, Clone)]
 pub struct Client {
-    /// Underlying `reqwest` client instance that handles the HTTP requests.
-    reqwest_client: reqwest::Client,
-
-    /// Optional GitHub client that handles communications with GitHub.
-    github_client: Option<Octocrab>,
-
     /// Optional remapping rules for URIs matching pattern.
     remaps: Option<Remaps>,
 
-    /// Rules to decided whether each link would be checked or ignored.
+    /// Rules to decided whether each link should be checked or ignored.
     filter: Filter,
 
-    /// Maximum number of retries per request before returning an error.
-    max_retries: u64,
+    /// A checker for website URLs.
+    website_checker: WebsiteChecker,
 
-    /// Initial wait time between retries of failed requests. This doubles after
-    /// each failure.
-    retry_wait_time: Duration,
+    /// A checker for file URLs.
+    file_checker: FileChecker,
 
-    /// HTTP method used for requests, e.g. `GET` or `HEAD`.
-    ///
-    /// The same method will be used for all links.
-    method: reqwest::Method,
+    /// A checker for email URLs.
+    email_checker: MailChecker,
 
-    /// Set of accepted return codes / status codes.
-    ///
-    /// Unmatched return codes/ status codes are deemed as errors.
-    accepted: Option<HashSet<StatusCode>>,
-
-    /// Requires using HTTPS when it's available.
-    ///
-    /// This would treat unencrypted links as errors when HTTPS is available.
-    require_https: bool,
-
-    /// Override behaviors for certain known issues with special URIs.
-    quirks: Quirks,
+    /// Caches Fragments
+    fragment_checker: FragmentChecker,
 }
 
 impl Client {
@@ -415,7 +444,7 @@ impl Client {
     ///
     /// Returns an `Err` if:
     /// - `request` does not represent a valid URI.
-    /// - Encrypted connection for a HTTP URL is available but unused.  (Only
+    /// - Encrypted connection for a HTTP URL is available but unused. (Only
     ///   checked when `Client::require_https` is `true`.)
     #[allow(clippy::missing_panics_doc)]
     pub async fn check<T, E>(&self, request: T) -> Result<Response>
@@ -425,41 +454,52 @@ impl Client {
     {
         let Request {
             ref mut uri,
+            credentials,
             source,
             ..
         } = request.try_into()?;
 
-        self.remap(uri);
+        // Allow filtering based on element and attribute
+        // if !self.filter.is_allowed(uri) {
+        //     return Ok(Response::new(
+        //         uri.clone(),
+        //         Status::Excluded,
+        //         source,
+        //     ));
+        // }
 
-        // TODO: Allow filtering based on element and attribute
-        let status = if self.is_excluded(uri) {
-            Status::Excluded
-        } else if uri.is_file() {
-            self.check_file(uri)
-        } else if uri.is_mail() {
-            self.check_mail(uri).await
-        } else {
-            match self.check_website(uri).await {
-                Status::Ok(code) if self.require_https && uri.scheme() == "http" => {
-                    if self.check_website(&uri.to_https()?).await.is_success() {
-                        Status::Error(ErrorKind::InsecureURL(uri.clone()))
-                    } else {
-                        Status::Ok(code)
-                    }
-                }
-                s => s,
-            }
+        self.remap(uri)?;
+
+        if self.is_excluded(uri) {
+            return Ok(Response::new(uri.clone(), Status::Excluded, source));
+        }
+
+        let status = match uri.scheme() {
+            // We don't check tel: URIs
+            _ if uri.is_tel() => Status::Excluded,
+            _ if uri.is_file() => self.check_file(uri).await,
+            _ if uri.is_mail() => self.check_mail(uri).await,
+            _ => self.check_website(uri, credentials).await?,
         };
 
         Ok(Response::new(uri.clone(), status, source))
     }
 
+    /// Check a single file using the file checker.
+    pub async fn check_file(&self, uri: &Uri) -> Status {
+        self.file_checker.check(uri).await
+    }
+
     /// Remap `uri` using the client-defined remapping rules.
-    pub fn remap(&self, uri: &mut Uri) {
-        // TODO: this should be logged (Lucius, Jan 2023)
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if the final, remapped `uri` is not a valid URI.
+    pub fn remap(&self, uri: &mut Uri) -> Result<()> {
         if let Some(ref remaps) = self.remaps {
-            remaps.remap(&mut uri.url);
+            uri.url = remaps.remap(&uri.url)?;
         }
+        Ok(())
     }
 
     /// Returns whether the given `uri` should be ignored from checking.
@@ -470,156 +510,37 @@ impl Client {
 
     /// Checks the given URI of a website.
     ///
-    /// Unsupported schemes will be ignored
-    ///
     /// # Errors
     ///
     /// This returns an `Err` if
     /// - The URI is invalid.
     /// - The request failed.
     /// - The response status code is not accepted.
-    pub async fn check_website(&self, uri: &Uri) -> Status {
-        // Workaround for upstream reqwest panic
-        if validate_url(&uri.url) {
-            if matches!(uri.scheme(), "http" | "https") {
-                // This is a truly invalid URI with a known scheme.
-                // If we pass that to reqwest it would panic.
-                return Status::Error(ErrorKind::InvalidURI(uri.clone()));
-            }
-            // This is merely a URI with a scheme that is not supported by
-            // reqwest yet. It would be safe to pass that to reqwest and it
-            // wouldn't panic, but it's also unnecessary, because it would
-            // simply return an error.
-            return Status::Unsupported(ErrorKind::InvalidURI(uri.clone()));
-        }
-
-        let status = self.retry_request(uri).await;
-        if status.is_success() {
-            return status;
-        }
-
-        // Pull out the heavy machinery in case of a failed normal request.
-        // This could be a GitHub URL and we ran into the rate limiter.
-        // TODO: We should first try to parse the URI as GitHub URI first (Lucius, Jan 2023)
-        if let Ok(github_uri) = GithubUri::try_from(uri) {
-            let status = self.check_github(github_uri).await;
-            // Only return Github status in case of success
-            // Otherwise return the original error, which has more information
-            if status.is_success() {
-                return status;
-            }
-        }
-
-        status
+    /// - The URI cannot be converted to HTTPS.
+    pub async fn check_website(
+        &self,
+        uri: &Uri,
+        credentials: Option<BasicAuthCredentials>,
+    ) -> Result<Status> {
+        self.website_checker.check_website(uri, credentials).await
     }
 
-    /// Retry requests up to `max_retries` times
-    /// with an exponential backoff.
-    async fn retry_request(&self, uri: &Uri) -> Status {
-        let mut retries: u64 = 0;
-        let mut wait_time = self.retry_wait_time;
-
-        let mut status = self.check_default(uri).await;
-        while retries < self.max_retries {
-            if status.is_success() || !status.should_retry() {
-                return status;
-            }
-            retries += 1;
-            tokio::time::sleep(wait_time).await;
-            wait_time = wait_time.saturating_mul(2);
-            status = self.check_default(uri).await;
-        }
-        status
-    }
-
-    /// Check a `uri` hosted on `GitHub` via the GitHub API.
-    ///
-    /// # Caveats
-    ///
-    /// Files inside private repositories won't get checked and instead would
-    /// be reported as valid if the repository itself is reachable through the
-    /// API.
-    ///
-    /// A better approach would be to download the file through the API or
-    /// clone the repo, but we chose the pragmatic approach.
-    async fn check_github(&self, uri: GithubUri) -> Status {
-        let Some(client) = &self.github_client else { return ErrorKind::MissingGitHubToken.into() };
-        let repo = match client.repos(&uri.owner, &uri.repo).get().await {
-            Ok(repo) => repo,
-            Err(e) => return ErrorKind::GithubRequest(e).into(),
-        };
-        if let Some(true) = repo.private {
-            // The private repo exists. Assume a given endpoint exists as well
-            // (e.g. `issues` in `github.com/org/private/issues`). This is not
-            // always the case but simplifies the check.
-            return Status::Ok(StatusCode::OK);
-        } else if let Some(endpoint) = uri.endpoint {
-            // The URI returned a non-200 status code from a normal request and
-            // now we find that this public repo is reachable through the API,
-            // so that must mean the full URI (which includes the additional
-            // endpoint) must be invalid.
-            return ErrorKind::InvalidGithubUrl(format!("{}/{}/{endpoint}", uri.owner, uri.repo))
-                .into();
-        }
-        // Found public repo without endpoint
-        Status::Ok(StatusCode::OK)
-    }
-
-    /// Check a URI using [reqwest](https://github.com/seanmonstar/reqwest).
-    async fn check_default(&self, uri: &Uri) -> Status {
-        let request = match self
-            .reqwest_client
-            .request(self.method.clone(), uri.as_str())
-            .build()
-        {
-            Ok(r) => r,
-            Err(e) => return e.into(),
-        };
-
-        let request = self.quirks.apply(request);
-
-        match self.reqwest_client.execute(request).await {
-            Ok(ref response) => Status::new(response, self.accepted.clone()),
-            Err(e) => e.into(),
-        }
-    }
-
-    /// Check a `file` URI.
-    pub fn check_file(&self, uri: &Uri) -> Status {
-        if let Ok(path) = uri.url.to_file_path() {
-            if path.exists() {
-                return Status::Ok(StatusCode::OK);
-            }
-        }
-        ErrorKind::InvalidFilePath(uri.clone()).into()
-    }
-
-    /// Check a mail address, or equivalently a `mailto` URI.
-    ///
-    /// URIs may contain query parameters (e.g. `contact@example.com?subject="Hello"`),
-    /// which are ignored by this check. The are not part of the mail address
-    /// and instead passed to a mail client.
+    /// Checks a `mailto` URI.
     pub async fn check_mail(&self, uri: &Uri) -> Status {
-        let address = uri.url.path().to_string();
-        let input = CheckEmailInput::new(address);
-        let result = &(check_email(&input).await);
+        self.email_checker.check_mail(uri).await
+    }
 
-        if let Reachable::Invalid = result.is_reachable {
-            ErrorKind::UnreachableEmailAddress(uri.clone(), mail::error_from_output(result)).into()
-        } else {
-            Status::Ok(StatusCode::OK)
+    /// Checks a `file` URI's fragment.
+    pub async fn check_fragment(&self, path: &Path, uri: &Uri) -> Status {
+        match self.fragment_checker.check(path, &uri.url).await {
+            Ok(true) => Status::Ok(StatusCode::OK),
+            Ok(false) => ErrorKind::InvalidFragment(uri.clone()).into(),
+            Err(err) => {
+                warn!("Skipping fragment check due to the following error: {err}");
+                Status::Ok(StatusCode::OK)
+            }
         }
     }
-}
-
-// Check if the given `Url` would cause `reqwest` to panic.
-// This is a workaround for https://github.com/lycheeverse/lychee/issues/539
-// and can be removed once https://github.com/seanmonstar/reqwest/pull/1399
-// got merged.
-// It is exactly the same check that reqwest runs internally, but unfortunately
-// it `unwrap`s (and panics!) instead of returning an error, which we could handle.
-fn validate_url(url: &Url) -> bool {
-    http::Uri::try_from(url.as_str()).is_err()
 }
 
 /// A shorthand function to check a single URI.
@@ -650,26 +571,32 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use async_trait::async_trait;
     use http::{header::HeaderMap, StatusCode};
     use reqwest::header;
     use tempfile::tempdir;
     use wiremock::matchers::path;
 
     use super::ClientBuilder;
-    use crate::{mock_server, test_utils::get_mock_client_response, Uri};
+    use crate::{
+        chain::{ChainResult, Handler, RequestChain},
+        mock_server,
+        test_utils::get_mock_client_response,
+        ErrorKind, Request, Status, Uri,
+    };
 
     #[tokio::test]
     async fn test_nonexistent() {
         let mock_server = mock_server!(StatusCode::NOT_FOUND);
         let res = get_mock_client_response(mock_server.uri()).await;
 
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
     }
 
     #[tokio::test]
     async fn test_nonexistent_with_path() {
         let res = get_mock_client_response("http://127.0.0.1/invalid").await;
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
     }
 
     #[tokio::test]
@@ -681,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn test_github_nonexistent_repo() {
         let res = get_mock_client_response("https://github.com/lycheeverse/not-lychee").await;
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
     }
 
     #[tokio::test]
@@ -690,7 +617,7 @@ mod tests {
             "https://github.com/lycheeverse/lychee/blob/master/NON_EXISTENT_FILE.md",
         )
         .await;
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
     }
 
     #[tokio::test]
@@ -700,7 +627,25 @@ mod tests {
         assert!(res.status().is_success());
 
         let res = get_mock_client_response("https://www.youtube.com/watch?v=invalidNlKuICiT470&list=PLbWDhxwM_45mPVToqaIZNbZeIzFchsKKQ&index=7").await;
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
+    }
+
+    #[tokio::test]
+    async fn test_basic_auth() {
+        let mut r: Request = "https://authenticationtest.com/HTTPAuth/"
+            .try_into()
+            .unwrap();
+
+        let res = get_mock_client_response(r.clone()).await;
+        assert_eq!(res.status().code(), Some(401.try_into().unwrap()));
+
+        r.credentials = Some(crate::BasicAuthCredentials {
+            username: "user".into(),
+            password: "pass".into(),
+        });
+
+        let res = get_mock_client_response(r).await;
+        assert!(res.status().is_success());
     }
 
     #[tokio::test]
@@ -715,7 +660,7 @@ mod tests {
     async fn test_invalid_ssl() {
         let res = get_mock_client_response("https://expired.badssl.com/").await;
 
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
 
         // Same, but ignore certificate error
         let res = ClientBuilder::builder()
@@ -757,9 +702,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exclude_mail() {
+    async fn test_exclude_mail_by_default() {
         let client = ClientBuilder::builder()
-            .exclude_mail(false)
+            .exclude_all_private(true)
+            .build()
+            .client()
+            .unwrap();
+        assert!(client.is_excluded(&Uri {
+            url: "mailto://mail@example.com".try_into().unwrap()
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_include_mail() {
+        let client = ClientBuilder::builder()
+            .include_mail(false)
+            .exclude_all_private(true)
+            .build()
+            .client()
+            .unwrap();
+        assert!(client.is_excluded(&Uri {
+            url: "mailto://mail@example.com".try_into().unwrap()
+        }));
+
+        let client = ClientBuilder::builder()
+            .include_mail(true)
             .exclude_all_private(true)
             .build()
             .client()
@@ -767,15 +734,13 @@ mod tests {
         assert!(!client.is_excluded(&Uri {
             url: "mailto://mail@example.com".try_into().unwrap()
         }));
+    }
 
-        let client = ClientBuilder::builder()
-            .exclude_mail(true)
-            .exclude_all_private(true)
-            .build()
-            .client()
-            .unwrap();
+    #[tokio::test]
+    async fn test_include_tel() {
+        let client = ClientBuilder::builder().build().client().unwrap();
         assert!(client.is_excluded(&Uri {
-            url: "mailto://mail@example.com".try_into().unwrap()
+            url: "tel:1234567890".try_into().unwrap()
         }));
     }
 
@@ -792,7 +757,7 @@ mod tests {
             .client()
             .unwrap();
         let res = client.check("http://example.com").await.unwrap();
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
     }
 
     #[tokio::test]
@@ -835,7 +800,6 @@ mod tests {
             .unwrap();
         let _res = warm_up_client.check(mock_server.uri()).await.unwrap();
 
-        let start = Instant::now();
         let client = ClientBuilder::builder()
             .timeout(checker_timeout)
             .max_retries(3_u64)
@@ -853,22 +817,28 @@ mod tests {
         // 6. Retry after 200ms (total 360ms)
         // Total: 360ms
 
+        let start = Instant::now();
         let res = client.check(mock_server.uri()).await.unwrap();
         let end = start.elapsed();
 
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
 
         // on slow connections, this might take a bit longer than nominal
         // backed-off timeout (7 secs)
-        assert!((350..=450).contains(&end.as_millis()));
+        assert!((350..=550).contains(&end.as_millis()));
     }
 
     #[tokio::test]
     async fn test_avoid_reqwest_panic() {
         let client = ClientBuilder::builder().build().client().unwrap();
-        // This request will fail, but it won't panic
+        // This request will result in an Unsupported status, but it won't panic
         let res = client.check("http://\"").await.unwrap();
-        assert!(res.status().is_failure());
+
+        assert!(matches!(
+            res.status(),
+            Status::Unsupported(ErrorKind::BuildRequestClient(_))
+        ));
+        assert!(res.status().is_unsupported());
     }
 
     #[tokio::test]
@@ -895,16 +865,16 @@ mod tests {
             .await;
 
         let client = ClientBuilder::builder()
-            .max_redirects(1_usize)
+            .max_redirects(0_usize)
             .build()
             .client()
             .unwrap();
 
         let res = client.check(redirect_uri.clone()).await.unwrap();
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
 
         let client = ClientBuilder::builder()
-            .max_redirects(2_usize)
+            .max_redirects(1_usize)
             .build()
             .client()
             .unwrap();
@@ -932,7 +902,7 @@ mod tests {
             .unwrap();
 
         let res = client.check(mock_server.uri()).await.unwrap();
-        assert!(res.status().is_failure());
+        assert!(res.status().is_error());
     }
 
     #[tokio::test]
@@ -948,5 +918,32 @@ mod tests {
             let res = client.check(example).await.unwrap();
             assert!(res.status().is_unsupported());
         }
+    }
+
+    #[tokio::test]
+    async fn test_chain() {
+        use reqwest::Request;
+
+        #[derive(Debug)]
+        struct ExampleHandler();
+
+        #[async_trait]
+        impl Handler<Request, Status> for ExampleHandler {
+            async fn handle(&mut self, _: Request) -> ChainResult<Request, Status> {
+                ChainResult::Done(Status::Excluded)
+            }
+        }
+
+        let chain = RequestChain::new(vec![Box::new(ExampleHandler {})]);
+
+        let client = ClientBuilder::builder()
+            .plugin_request_chain(chain)
+            .build()
+            .client()
+            .unwrap();
+
+        let result = client.check("http://example.com");
+        let res = result.await.unwrap();
+        assert_eq!(res.status(), &Status::Excluded);
     }
 }

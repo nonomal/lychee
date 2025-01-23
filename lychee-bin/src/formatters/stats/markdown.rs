@@ -96,11 +96,11 @@ impl Display for MarkdownResponseStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let stats = &self.0;
 
-        writeln!(f, "## Summary")?;
+        writeln!(f, "# Summary")?;
         writeln!(f)?;
         writeln!(f, "{}", stats_table(&self.0))?;
 
-        write_stats_per_input(f, "Errors", &stats.fail_map, |response| {
+        write_stats_per_input(f, "Errors", &stats.error_map, |response| {
             markdown_response(response).map_err(|_e| fmt::Error)
         })?;
 
@@ -147,7 +147,7 @@ impl Markdown {
 }
 
 impl StatsFormatter for Markdown {
-    fn format_stats(&self, stats: ResponseStats) -> Result<Option<String>> {
+    fn format(&self, stats: ResponseStats) -> Result<Option<String>> {
         let markdown = MarkdownResponseStats(stats);
         Ok(Some(markdown.to_string()))
     }
@@ -186,7 +186,7 @@ mod tests {
         let markdown = markdown_response(&response).unwrap();
         assert_eq!(
             markdown,
-            "* [200] [http://example.com/](http://example.com/) | Cached: OK (cached)"
+            "* [200] [http://example.com/](http://example.com/) | OK (cached)"
         );
     }
 
@@ -199,7 +199,7 @@ mod tests {
         let markdown = markdown_response(&response).unwrap();
         assert_eq!(
             markdown,
-            "* [400] [http://example.com/](http://example.com/) | Cached: Error (cached)"
+            "* [400] [http://example.com/](http://example.com/) | Error (cached)"
         );
     }
 
@@ -207,7 +207,7 @@ mod tests {
     fn test_render_stats() {
         let stats = ResponseStats::default();
         let table = stats_table(&stats);
-        let expected = r#"| Status        | Count |
+        let expected = "| Status        | Count |
 |---------------|-------|
 | 🔍 Total      | 0     |
 | ✅ Successful | 0     |
@@ -215,19 +215,17 @@ mod tests {
 | 🔀 Redirected | 0     |
 | 👻 Excluded   | 0     |
 | ❓ Unknown    | 0     |
-| 🚫 Errors     | 0     |"#;
+| 🚫 Errors     | 0     |";
         assert_eq!(table, expected.to_string());
     }
 
     #[test]
     fn test_render_summary() {
         let mut stats = ResponseStats::default();
-        let response = Response(
+        let response = Response::new(
+            Uri::try_from("http://127.0.0.1").unwrap(),
+            Status::Cached(CacheStatus::Error(Some(404))),
             InputSource::Stdin,
-            ResponseBody {
-                uri: Uri::try_from("http://127.0.0.1").unwrap(),
-                status: Status::Cached(CacheStatus::Error(Some(404))),
-            },
         );
         stats.add(response);
         stats
@@ -239,7 +237,7 @@ mod tests {
                 original: Url::parse("https://example.com/original").unwrap(),
             });
         let summary = MarkdownResponseStats(stats);
-        let expected = r#"## Summary
+        let expected = "# Summary
 
 | Status        | Count |
 |---------------|-------|
@@ -255,14 +253,14 @@ mod tests {
 
 ### Errors in stdin
 
-* [404] [http://127.0.0.1/](http://127.0.0.1/) | Cached: Error (cached)
+* [404] [http://127.0.0.1/](http://127.0.0.1/) | Error (cached)
 
 ## Suggestions per input
 
 ### Suggestions in stdin
 
 * https://example.com/original --> https://example.com/suggestion
-"#;
+";
         assert_eq!(summary.to_string(), expected.to_string());
     }
 }

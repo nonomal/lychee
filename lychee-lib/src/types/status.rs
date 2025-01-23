@@ -36,7 +36,7 @@ pub enum Status {
     Excluded,
     /// The request type is currently not supported,
     /// for example when the URL scheme is `slack://`.
-    /// See https://github.com/lycheeverse/lychee/issues/199
+    /// See <https://github.com/lycheeverse/lychee/issues/199>
     Unsupported(ErrorKind),
     /// Cached request status from previous run
     Cached(CacheStatus),
@@ -45,15 +45,15 @@ pub enum Status {
 impl Display for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Status::Ok(code) => write!(f, "OK ({code})"),
+            Status::Ok(code) => write!(f, "{code}"),
             Status::Redirected(code) => write!(f, "Redirect ({code})"),
             Status::UnknownStatusCode(code) => write!(f, "Unknown status ({code})"),
-            Status::Excluded => f.write_str("Excluded"),
             Status::Timeout(Some(code)) => write!(f, "Timeout ({code})"),
             Status::Timeout(None) => f.write_str("Timeout"),
             Status::Unsupported(e) => write!(f, "Unsupported: {e}"),
-            Status::Error(e) => write!(f, "Failed: {e}"),
-            Status::Cached(status) => write!(f, "Cached: {status}"),
+            Status::Error(e) => write!(f, "{e}"),
+            Status::Cached(status) => write!(f, "{status}"),
+            Status::Excluded => Ok(()),
         }
     }
 }
@@ -68,6 +68,10 @@ impl Serialize for Status {
             s = serializer.serialize_struct("Status", 2)?;
             s.serialize_field("text", &self.to_string())?;
             s.serialize_field("code", &code.as_u16())?;
+        } else if let Some(details) = self.details() {
+            s = serializer.serialize_struct("Status", 2)?;
+            s.serialize_field("text", &self.to_string())?;
+            s.serialize_field("details", &details.to_string())?;
         } else {
             s = serializer.serialize_struct("Status", 1)?;
             s.serialize_field("text", &self.to_string())?;
@@ -104,19 +108,17 @@ impl Status {
     /// because they are provided by the user and can be invalid according to
     /// the HTTP spec and IANA, but the user might still want to accept them.
     #[must_use]
-    pub fn from_cache_status(s: CacheStatus, accepted: Option<HashSet<u16>>) -> Self {
+    pub fn from_cache_status(s: CacheStatus, accepted: &HashSet<u16>) -> Self {
         match s {
             CacheStatus::Ok(code) => {
-                if matches!(s, CacheStatus::Ok(_))
-                    || accepted.map(|a| a.contains(&code)) == Some(true)
-                {
+                if matches!(s, CacheStatus::Ok(_)) || accepted.contains(&code) {
                     return Self::Cached(CacheStatus::Ok(code));
                 };
                 Self::Cached(CacheStatus::Error(Some(code)))
             }
             CacheStatus::Error(code) => {
                 if let Some(code) = code {
-                    if accepted.map(|a| a.contains(&code)) == Some(true) {
+                    if accepted.contains(&code) {
                         return Self::Cached(CacheStatus::Ok(code));
                     };
                 }
@@ -158,7 +160,7 @@ impl Status {
     #[inline]
     #[must_use]
     /// Returns `true` if the check was not successful
-    pub const fn is_failure(&self) -> bool {
+    pub const fn is_error(&self) -> bool {
         matches!(
             self,
             Status::Error(_) | Status::Cached(CacheStatus::Error(_)) | Status::Timeout(_)
@@ -207,8 +209,8 @@ impl Status {
         }
     }
 
-    /// Return the HTTP status code (if any)
     #[must_use]
+    /// Return the HTTP status code (if any)
     pub fn code(&self) -> Option<StatusCode> {
         match self {
             Status::Ok(code)
@@ -222,15 +224,12 @@ impl Status {
                     None
                 }
             }
-            Status::Cached(cache_status) => match cache_status {
-                CacheStatus::Ok(code) | CacheStatus::Error(Some(code)) => {
-                    match StatusCode::from_u16(*code) {
-                        Ok(code) => Some(code),
-                        Err(_) => None,
-                    }
+            Status::Cached(CacheStatus::Ok(code) | CacheStatus::Error(Some(code))) => {
+                match StatusCode::from_u16(*code) {
+                    Ok(code) => Some(code),
+                    Err(_) => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         }
     }
@@ -248,9 +247,9 @@ impl Status {
                 | ErrorKind::ReadResponseBody(e)
                 | ErrorKind::BuildRequestClient(e) => match e.status() {
                     Some(code) => code.as_str().to_string(),
-                    None => "ERR".to_string(),
+                    None => "ERROR".to_string(),
                 },
-                _ => "ERR".to_string(),
+                _ => "ERROR".to_string(),
             },
             Status::Timeout(code) => match code {
                 Some(code) => code.as_str().to_string(),
@@ -261,12 +260,22 @@ impl Status {
                 CacheStatus::Ok(code) => code.to_string(),
                 CacheStatus::Error(code) => match code {
                     Some(code) => code.to_string(),
-                    None => "ERR".to_string(),
+                    None => "ERROR".to_string(),
                 },
                 CacheStatus::Excluded => "EXCLUDED".to_string(),
                 CacheStatus::Unsupported => "IGNORED".to_string(),
             },
         }
+    }
+
+    /// Returns true if the status code is unknown
+    /// (i.e. not a valid HTTP status code)
+    ///
+    /// For example, `200` is a valid HTTP status code,
+    /// while `999` is not.
+    #[must_use]
+    pub const fn is_unknown(&self) -> bool {
+        matches!(self, Status::UnknownStatusCode(_))
     }
 }
 
@@ -301,10 +310,7 @@ mod tests {
     fn test_status_serialization() {
         let status_ok = Status::Ok(StatusCode::from_u16(200).unwrap());
         let serialized_with_code = serde_json::to_string(&status_ok).unwrap();
-        assert_eq!(
-            "{\"text\":\"OK (200 OK)\",\"code\":200}",
-            serialized_with_code
-        );
+        assert_eq!("{\"text\":\"200 OK\",\"code\":200}", serialized_with_code);
 
         let status_timeout = Status::Timeout(None);
         let serialized_without_code = serde_json::to_string(&status_timeout).unwrap();
@@ -351,5 +357,11 @@ mod tests {
             Status::Unsupported(ErrorKind::InvalidStatusCode(999)).code(),
             None
         );
+    }
+
+    #[test]
+    fn test_status_unknown() {
+        assert!(Status::UnknownStatusCode(StatusCode::from_u16(999).unwrap()).is_unknown());
+        assert!(!Status::Ok(StatusCode::from_u16(200).unwrap()).is_unknown());
     }
 }
