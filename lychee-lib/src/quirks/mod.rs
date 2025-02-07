@@ -1,3 +1,8 @@
+use crate::{
+    chain::{ChainResult, Handler},
+    Status,
+};
+use async_trait::async_trait;
 use header::HeaderValue;
 use http::header;
 use once_cell::sync::Lazy;
@@ -5,12 +10,10 @@ use regex::Regex;
 use reqwest::{Request, Url};
 use std::collections::HashMap;
 
-static TWITTER_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(https?://)?(www\.)?twitter.com").unwrap());
 static CRATES_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(https?://)?(www\.)?crates.io").unwrap());
 static YOUTUBE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(https?://)?(www\.)?(youtube\.com)").unwrap());
+    Lazy::new(|| Regex::new(r"^(https?://)?(www\.)?youtube(-nocookie)?\.com").unwrap());
 static YOUTUBE_SHORT_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(https?://)?(www\.)?(youtu\.?be)").unwrap());
 
@@ -34,13 +37,6 @@ impl Default for Quirks {
     fn default() -> Self {
         let quirks = vec![
             Quirk {
-                pattern: &TWITTER_PATTERN,
-                rewrite: |mut request| {
-                    request.url_mut().set_host(Some("nitter.net")).unwrap();
-                    request
-                },
-            },
-            Quirk {
                 pattern: &CRATES_PATTERN,
                 rewrite: |mut request| {
                     request
@@ -52,13 +48,21 @@ impl Default for Quirks {
             Quirk {
                 pattern: &YOUTUBE_PATTERN,
                 rewrite: |mut request| {
-                    if request.url().path() != "/watch" {
-                        return request;
-                    }
-                    if let Some(id) = query(&request).get("v") {
+                    // Extract video id if it's a video page
+                    let video_id = match request.url().path() {
+                        "/watch" => query(&request).get("v").map(ToOwned::to_owned),
+                        path if path.starts_with("/embed/") => {
+                            path.strip_prefix("/embed/").map(ToOwned::to_owned)
+                        }
+                        _ => return request,
+                    };
+
+                    // Only rewrite to thumbnail if we got a video id
+                    if let Some(id) = video_id {
                         *request.url_mut() =
                             Url::parse(&format!("https://img.youtube.com/vi/{id}/0.jpg")).unwrap();
                     }
+
                     request
                 },
             },
@@ -95,6 +99,13 @@ impl Quirks {
     }
 }
 
+#[async_trait]
+impl Handler<Request, Status> for Quirks {
+    async fn handle(&mut self, input: Request) -> ChainResult<Request, Status> {
+        ChainResult::Next(self.apply(input))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use header::HeaderValue;
@@ -119,34 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn test_twitter_request() {
-        let cases = vec![
-            (
-                "https://twitter.com/search?q=rustlang",
-                "https://nitter.net/search?q=rustlang",
-            ),
-            ("http://twitter.com/jack", "http://nitter.net/jack"),
-            (
-                "https://twitter.com/notifications",
-                "https://nitter.net/notifications",
-            ),
-        ];
-
-        for (input, output) in cases {
-            let url = Url::parse(input).unwrap();
-            let expected = Url::parse(output).unwrap();
-
-            let request = Request::new(Method::GET, url.clone());
-            let modified = Quirks::default().apply(request);
-
-            assert_eq!(
-                MockRequest(modified),
-                MockRequest::new(Method::GET, expected)
-            );
-        }
-    }
-
-    #[test]
     fn test_cratesio_request() {
         let url = Url::parse("https://crates.io/crates/lychee").unwrap();
         let request = Request::new(Method::GET, url);
@@ -164,6 +147,19 @@ mod tests {
         let request = Request::new(Method::GET, url);
         let modified = Quirks::default().apply(request);
         let expected_url = Url::parse("https://img.youtube.com/vi/NlKuICiT470/0.jpg").unwrap();
+
+        assert_eq!(
+            MockRequest(modified),
+            MockRequest::new(Method::GET, expected_url)
+        );
+    }
+
+    #[test]
+    fn test_youtube_video_nocookie_request() {
+        let url = Url::parse("https://www.youtube-nocookie.com/embed/BIguvia6AvM").unwrap();
+        let request = Request::new(Method::GET, url);
+        let modified = Quirks::default().apply(request);
+        let expected_url = Url::parse("https://img.youtube.com/vi/BIguvia6AvM/0.jpg").unwrap();
 
         assert_eq!(
             MockRequest(modified),

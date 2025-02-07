@@ -1,38 +1,89 @@
+use crate::ErrorKind;
+use crate::InputSource;
 use crate::{
-    extract::Extractor, types::uri::raw::RawUri, utils::request, Base, Input, Request, Result,
+    basic_auth::BasicAuthExtractor, extract::Extractor, types::uri::raw::RawUri, utils::request,
+    Base, Input, Request, Result,
 };
+use futures::TryStreamExt;
 use futures::{
     stream::{self, Stream},
-    StreamExt, TryStreamExt,
+    StreamExt,
 };
 use par_stream::ParStreamExt;
+use std::path::PathBuf;
 
 /// Collector keeps the state of link collection
 /// It drives the link extraction from inputs
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct Collector {
-    base: Option<Base>,
+    basic_auth_extractor: Option<BasicAuthExtractor>,
     skip_missing_inputs: bool,
+    skip_ignored: bool,
+    skip_hidden: bool,
     include_verbatim: bool,
     use_html5ever: bool,
+    root_dir: Option<PathBuf>,
+    base: Option<Base>,
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        Collector {
+            basic_auth_extractor: None,
+            skip_missing_inputs: false,
+            include_verbatim: false,
+            use_html5ever: false,
+            skip_hidden: true,
+            skip_ignored: true,
+            root_dir: None,
+            base: None,
+        }
+    }
 }
 
 impl Collector {
     /// Create a new collector with an empty cache
-    #[must_use]
-    pub const fn new(base: Option<Base>) -> Self {
-        Collector {
-            base,
-            skip_missing_inputs: false,
-            use_html5ever: false,
-            include_verbatim: false,
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if the `root_dir` is not an absolute path
+    pub fn new(root_dir: Option<PathBuf>, base: Option<Base>) -> Result<Self> {
+        if let Some(root_dir) = &root_dir {
+            if root_dir.is_relative() {
+                return Err(ErrorKind::RootDirMustBeAbsolute(root_dir.clone()));
+            }
         }
+        Ok(Collector {
+            basic_auth_extractor: None,
+            skip_missing_inputs: false,
+            include_verbatim: false,
+            use_html5ever: false,
+            skip_hidden: true,
+            skip_ignored: true,
+            root_dir,
+            base,
+        })
     }
 
     /// Skip missing input files (default is to error if they don't exist)
     #[must_use]
     pub const fn skip_missing_inputs(mut self, yes: bool) -> Self {
         self.skip_missing_inputs = yes;
+        self
+    }
+
+    /// Skip files that are hidden
+    #[must_use]
+    pub const fn skip_hidden(mut self, yes: bool) -> Self {
+        self.skip_hidden = yes;
+        self
+    }
+
+    /// Skip files that are ignored
+    #[must_use]
+    pub const fn skip_ignored(mut self, yes: bool) -> Self {
+        self.skip_ignored = yes;
         self
     }
 
@@ -50,6 +101,24 @@ impl Collector {
         self
     }
 
+    /// Pass a [`BasicAuthExtractor`] which is capable to match found
+    /// URIs to basic auth credentials. These credentials get passed to the
+    /// request in question.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn basic_auth_extractor(mut self, extractor: BasicAuthExtractor) -> Self {
+        self.basic_auth_extractor = Some(extractor);
+        self
+    }
+
+    /// Collect all sources from a list of [`Input`]s. For further details,
+    /// see also [`Input::get_sources`](crate::Input#method.get_sources).
+    pub fn collect_sources(self, inputs: Vec<Input>) -> impl Stream<Item = Result<String>> {
+        stream::iter(inputs)
+            .par_then_unordered(None, move |input| async move { input.get_sources() })
+            .flatten()
+    }
+
     /// Fetch all unique links from inputs
     /// All relative URLs get prefixed with `base` (if given).
     /// (This can be a directory or a base URL)
@@ -57,24 +126,39 @@ impl Collector {
     /// # Errors
     ///
     /// Will return `Err` if links cannot be extracted from an input
-    pub async fn collect_links(self, inputs: Vec<Input>) -> impl Stream<Item = Result<Request>> {
+    pub fn collect_links(self, inputs: Vec<Input>) -> impl Stream<Item = Result<Request>> {
         let skip_missing_inputs = self.skip_missing_inputs;
-        let contents = stream::iter(inputs)
-            .par_then_unordered(None, move |input| async move {
-                input.get_contents(skip_missing_inputs).await
+        let skip_hidden = self.skip_hidden;
+        let skip_ignored = self.skip_ignored;
+        let global_base = self.base;
+        stream::iter(inputs)
+            .par_then_unordered(None, move |input| {
+                let default_base = global_base.clone();
+                async move {
+                    let base = match &input.source {
+                        InputSource::RemoteUrl(url) => Base::try_from(url.as_str()).ok(),
+                        _ => default_base,
+                    };
+                    input
+                        .get_contents(skip_missing_inputs, skip_hidden, skip_ignored)
+                        .map(move |content| (content, base.clone()))
+                }
             })
-            .flatten();
-
-        let base = self.base;
-        contents
-            .par_then_unordered(None, move |content| {
-                // send to parallel worker
-                let base = base.clone();
+            .flatten()
+            .par_then_unordered(None, move |(content, base)| {
+                let root_dir = self.root_dir.clone();
+                let basic_auth_extractor = self.basic_auth_extractor.clone();
                 async move {
                     let content = content?;
                     let extractor = Extractor::new(self.use_html5ever, self.include_verbatim);
                     let uris: Vec<RawUri> = extractor.extract(&content);
-                    let requests = request::create(uris, &content, &base)?;
+                    let requests = request::create(
+                        uris,
+                        &content.source,
+                        root_dir.as_ref(),
+                        base.as_ref(),
+                        basic_auth_extractor.as_ref(),
+                    );
                     Result::Ok(stream::iter(requests.into_iter().map(Ok)))
                 }
             })
@@ -92,15 +176,31 @@ mod tests {
     use super::*;
     use crate::{
         mock_server,
-        test_utils::{load_fixture, mail, website},
+        test_utils::{load_fixture, mail, path, website},
         types::{FileType, Input, InputSource},
         Result, Uri,
     };
 
     // Helper function to run the collector on the given inputs
-    async fn collect(inputs: Vec<Input>, base: Option<Base>) -> HashSet<Uri> {
-        let responses = Collector::new(base).collect_links(inputs).await;
-        responses.map(|r| r.unwrap().uri).collect().await
+    async fn collect(
+        inputs: Vec<Input>,
+        root_dir: Option<PathBuf>,
+        base: Option<Base>,
+    ) -> Result<HashSet<Uri>> {
+        let responses = Collector::new(root_dir, base)?.collect_links(inputs);
+        Ok(responses.map(|r| r.unwrap().uri).collect().await)
+    }
+
+    // Helper function for collecting verbatim links
+    async fn collect_verbatim(
+        inputs: Vec<Input>,
+        root_dir: Option<PathBuf>,
+        base: Option<Base>,
+    ) -> Result<HashSet<Uri>> {
+        let responses = Collector::new(root_dir, base)?
+            .include_verbatim(true)
+            .collect_links(inputs);
+        Ok(responses.map(|r| r.unwrap().uri).collect().await)
     }
 
     const TEST_STRING: &str = "http://test-string.com";
@@ -116,7 +216,10 @@ mod tests {
         let file_path = temp_dir.path().join("README");
         let _file = File::create(&file_path).unwrap();
         let input = Input::new(&file_path.as_path().display().to_string(), None, true, None)?;
-        let contents: Vec<_> = input.get_contents(true).await.collect::<Vec<_>>().await;
+        let contents: Vec<_> = input
+            .get_contents(true, true, true)
+            .collect::<Vec<_>>()
+            .await;
 
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].as_ref().unwrap().file_type, FileType::Plaintext);
@@ -126,7 +229,10 @@ mod tests {
     #[tokio::test]
     async fn test_url_without_extension_is_html() -> Result<()> {
         let input = Input::new("https://example.com/", None, true, None)?;
-        let contents: Vec<_> = input.get_contents(true).await.collect::<Vec<_>>().await;
+        let contents: Vec<_> = input
+            .get_contents(true, true, true)
+            .collect::<Vec<_>>()
+            .await;
 
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].as_ref().unwrap().file_type, FileType::Html);
@@ -182,7 +288,7 @@ mod tests {
             },
         ];
 
-        let links = collect(inputs, None).await;
+        let links = collect_verbatim(inputs, None, None).await.ok().unwrap();
 
         let expected_links = HashSet::from_iter([
             website(TEST_STRING),
@@ -205,7 +311,7 @@ mod tests {
             file_type_hint: Some(FileType::Markdown),
                 excluded_paths: None,
         };
-        let links = collect(vec![input], Some(base)).await;
+        let links = collect(vec![input], None, Some(base)).await.ok().unwrap();
 
         let expected_links = HashSet::from_iter([
             website("https://endler.dev"),
@@ -231,7 +337,7 @@ mod tests {
             file_type_hint: Some(FileType::Html),
             excluded_paths: None,
         };
-        let links = collect(vec![input], Some(base)).await;
+        let links = collect(vec![input], None, Some(base)).await.ok().unwrap();
 
         let expected_links = HashSet::from_iter([
             website("https://github.com/lycheeverse/lychee/"),
@@ -260,7 +366,7 @@ mod tests {
             file_type_hint: Some(FileType::Html),
             excluded_paths: None,
         };
-        let links = collect(vec![input], Some(base)).await;
+        let links = collect(vec![input], None, Some(base)).await.ok().unwrap();
 
         let expected_links = HashSet::from_iter([
             website("https://example.com/static/image.png"),
@@ -277,17 +383,17 @@ mod tests {
 
         let input = Input {
             source: InputSource::String(
-                r#"This is [an internal url](@/internal.md)
+                "This is [an internal url](@/internal.md)
         This is [an internal url](@/internal.markdown)
         This is [an internal url](@/internal.markdown#example)
-        This is [an internal url](@/internal.md#example)"#
+        This is [an internal url](@/internal.md#example)"
                     .to_string(),
             ),
             file_type_hint: Some(FileType::Markdown),
             excluded_paths: None,
         };
 
-        let links = collect(vec![input], Some(base)).await;
+        let links = collect(vec![input], None, Some(base)).await.ok().unwrap();
 
         let expected = HashSet::from_iter([
             website("https://localhost.com/@/internal.md"),
@@ -309,7 +415,7 @@ mod tests {
             file_type_hint: Some(FileType::Html),
             excluded_paths: None,
         };
-        let links = collect(vec![input], Some(base)).await;
+        let links = collect(vec![input], None, Some(base)).await.ok().unwrap();
 
         let expected_links = HashSet::from_iter([
             // the body links wouldn't be present if the file was parsed strictly as XML
@@ -328,7 +434,7 @@ mod tests {
     async fn test_relative_url_with_base_extracted_from_input() {
         let contents = r#"<html>
             <div class="row">
-                <a href="https://github.com/lycheeverse/lychee/">Github</a>
+                <a href="https://github.com/lycheeverse/lychee/">GitHub</a>
                 <a href="/about">About</a>
             </div>
         </html>"#;
@@ -342,7 +448,7 @@ mod tests {
             excluded_paths: None,
         };
 
-        let links = collect(vec![input], None).await;
+        let links = collect(vec![input], None, None).await.ok().unwrap();
 
         let expected_urls = HashSet::from_iter([
             website("https://github.com/lycheeverse/lychee/"),
@@ -356,14 +462,95 @@ mod tests {
     async fn test_email_with_query_params() {
         let input = Input {
             source: InputSource::String(
-                r#"This is a mailto:user@example.com?subject=Hello link"#.to_string(),
+                "This is a mailto:user@example.com?subject=Hello link".to_string(),
             ),
             file_type_hint: None,
             excluded_paths: None,
         };
-        let links = collect(vec![input], None).await;
+        let links = collect(vec![input], None, None).await.ok().unwrap();
 
         let expected_links = HashSet::from_iter([mail("user@example.com")]);
+
+        assert_eq!(links, expected_links);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_remote_urls() {
+        let mock_server_1 = mock_server!(
+            StatusCode::OK,
+            set_body_string(r#"<a href="relative.html">Link</a>"#)
+        );
+        let mock_server_2 = mock_server!(
+            StatusCode::OK,
+            set_body_string(r#"<a href="relative.html">Link</a>"#)
+        );
+
+        let inputs = vec![
+            Input {
+                source: InputSource::RemoteUrl(Box::new(
+                    Url::parse(&format!(
+                        "{}/foo/index.html",
+                        mock_server_1.uri().trim_end_matches('/')
+                    ))
+                    .unwrap(),
+                )),
+                file_type_hint: Some(FileType::Html),
+                excluded_paths: None,
+            },
+            Input {
+                source: InputSource::RemoteUrl(Box::new(
+                    Url::parse(&format!(
+                        "{}/bar/index.html",
+                        mock_server_2.uri().trim_end_matches('/')
+                    ))
+                    .unwrap(),
+                )),
+                file_type_hint: Some(FileType::Html),
+                excluded_paths: None,
+            },
+        ];
+
+        let links = collect(inputs, None, None).await.ok().unwrap();
+
+        let expected_links = HashSet::from_iter([
+            website(&format!(
+                "{}/foo/relative.html",
+                mock_server_1.uri().trim_end_matches('/')
+            )),
+            website(&format!(
+                "{}/bar/relative.html",
+                mock_server_2.uri().trim_end_matches('/')
+            )),
+        ]);
+
+        assert_eq!(links, expected_links);
+    }
+
+    #[tokio::test]
+    async fn test_file_path_with_base() {
+        let base = Base::try_from("/path/to/root").unwrap();
+        assert_eq!(base, Base::Local("/path/to/root".into()));
+
+        let input = Input {
+            source: InputSource::String(
+                r#"
+                <a href="index.html">Index</a>
+                <a href="about.html">About</a> 
+                <a href="/another.html">Another</a> 
+            "#
+                .into(),
+            ),
+            file_type_hint: Some(FileType::Html),
+            excluded_paths: None,
+        };
+
+        let links = collect(vec![input], None, Some(base)).await.ok().unwrap();
+
+        let expected_links = HashSet::from_iter([
+            path("/path/to/root/index.html"),
+            path("/path/to/root/about.html"),
+            path("/another.html"),
+        ]);
 
         assert_eq!(links, expected_links);
     }

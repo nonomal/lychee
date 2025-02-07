@@ -10,16 +10,16 @@ jobs:
   linkChecker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Link Checker
         uses: lycheeverse/lychee-action@master
         with:
-          args: --verbose --no-progress --exclude example.com -- README.md
+          args: --verbose --exclude-path benches --exclude-path fixtures .
 
       - name: Create Issue From File
-        if: github.repository_owner == 'lycheeverse'
-        uses: peter-evans/create-issue-from-file@v4
+        if: github.repository_owner == 'lycheeverse' && env.lychee_exit_code != 0
+        uses: peter-evans/create-issue-from-file@v5
         with:
           title: Link Checker Report
           content-filepath: ./lychee/out.md

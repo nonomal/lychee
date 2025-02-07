@@ -1,7 +1,8 @@
 mod excludes;
 mod includes;
 
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
+use regex::RegexSet;
 use std::collections::HashSet;
 
 pub use excludes::Excludes;
@@ -10,29 +11,47 @@ pub use includes::Includes;
 use crate::Uri;
 
 #[cfg(all(not(test), not(feature = "check_example_domains")))]
-lazy_static! {
-    /// These domains are explicitly defined by RFC 2606, section 3 Reserved Example
-    /// Second Level Domain Names for describing example cases and should not be
-    /// dereferenced as they should not have content.
-    static ref EXAMPLE_DOMAINS: HashSet<&'static str> =
-        HashSet::from_iter(["example.com", "example.org", "example.net", "example.edu"]);
-}
+/// These domains are explicitly defined by RFC 2606, section 3 Reserved Example
+/// Second Level Domain Names for describing example cases and should not be
+/// dereferenced as they should not have content.
+static EXAMPLE_DOMAINS: Lazy<HashSet<&'static str>> =
+    Lazy::new(|| HashSet::from_iter(["example.com", "example.org", "example.net", "example.edu"]));
+
+#[cfg(all(not(test), not(feature = "check_example_domains")))]
+/// We also exclude the example TLDs in section 2 of the same RFC.
+/// This exclusion gets subsumed by the `check_example_domains` feature.
+static EXAMPLE_TLDS: Lazy<HashSet<&'static str>> =
+    Lazy::new(|| HashSet::from_iter([".test", ".example", ".invalid", ".localhost"]));
 
 // Allow usage of example domains in tests
 #[cfg(any(test, feature = "check_example_domains"))]
-lazy_static! {
-    static ref EXAMPLE_DOMAINS: HashSet<&'static str> = HashSet::new();
-}
+static EXAMPLE_DOMAINS: Lazy<HashSet<&'static str>> = Lazy::new(HashSet::new);
+
+#[cfg(any(test, feature = "check_example_domains"))]
+static EXAMPLE_TLDS: Lazy<HashSet<&'static str>> = Lazy::new(HashSet::new);
+
+static UNSUPPORTED_DOMAINS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    HashSet::from_iter([
+        // Twitter requires an account to view tweets
+        // https://news.ycombinator.com/item?id=36540957
+        "twitter.com",
+    ])
+});
 
 /// Pre-defined exclusions for known false-positives
 const FALSE_POSITIVE_PAT: &[&str] = &[
-    r"http://www.w3.org/1999/xhtml",
-    r"http://www.w3.org/1999/xlink",
-    r"http://www.w3.org/2000/svg",
-    r"https://schemas.microsoft.com",
-    r"http://schemas.zune.net",
-    r"http://schemas.openxmlformats.org",
+    r"^https?://schemas.openxmlformats.org",
+    r"^https?://schemas.zune.net",
+    r"^https?://www.w3.org/1999/xhtml",
+    r"^https?://www.w3.org/1999/xlink",
+    r"^https?://www.w3.org/2000/svg",
+    r"^https?://ogp.me/ns#",
+    r"^https?://schemas.microsoft.com",
+    r"^https?://(.*)/xmlrpc.php$",
 ];
+
+static FALSE_POSITIVE_SET: Lazy<RegexSet> =
+    Lazy::new(|| regex::RegexSet::new(FALSE_POSITIVE_PAT).expect("Failed to create RegexSet"));
 
 #[inline]
 #[must_use]
@@ -40,7 +59,7 @@ const FALSE_POSITIVE_PAT: &[&str] = &[
 /// default. This behavior can be explicitly overwritten by defining an
 /// `Include` pattern, which will match on a false positive
 pub fn is_false_positive(input: &str) -> bool {
-    FALSE_POSITIVE_PAT.iter().any(|pat| input.starts_with(pat))
+    FALSE_POSITIVE_SET.is_match(input)
 }
 
 #[inline]
@@ -48,12 +67,17 @@ pub fn is_false_positive(input: &str) -> bool {
 /// Check if the host belongs to a known example domain as defined in
 /// [RFC 2606](https://datatracker.ietf.org/doc/html/rfc2606)
 pub fn is_example_domain(uri: &Uri) -> bool {
-    let res = match uri.domain() {
+    match uri.domain() {
         Some(domain) => {
-            // It is not enough to use `EXAMPLE_DOMAINS.contains(domain)` here
-            // as this would not include checks for subdomains, such as
-            // `foo.example.com`
-            EXAMPLE_DOMAINS.iter().any(|tld| domain.ends_with(tld))
+            // Check if the domain is exactly an example domain or a subdomain of it.
+            EXAMPLE_DOMAINS.iter().any(|&example| {
+                domain == example
+                    || domain
+                        .split_once('.')
+                        .is_some_and(|(_subdomain, tld_part)| tld_part == example)
+            }) || EXAMPLE_TLDS
+                .iter()
+                .any(|&example_tld| domain.ends_with(example_tld))
         }
         None => {
             // Check if the URI is an email address.
@@ -65,8 +89,21 @@ pub fn is_example_domain(uri: &Uri) -> bool {
                 false
             }
         }
-    };
-    res
+    }
+}
+
+#[inline]
+#[must_use]
+/// Check if the host belongs to a known unsupported domain
+pub fn is_unsupported_domain(uri: &Uri) -> bool {
+    if let Some(domain) = uri.domain() {
+        // It is not enough to use `UNSUPPORTED_DOMAINS.contains(domain)` here
+        // as this would not include checks for subdomains, such as
+        // `foo.example.com`
+        UNSUPPORTED_DOMAINS.iter().any(|tld| domain.ends_with(tld))
+    } else {
+        false
+    }
 }
 
 /// A generic URI filter
@@ -87,18 +124,18 @@ pub struct Filter {
     /// Example: 169.254.0.0
     pub exclude_link_local_ips: bool,
     /// For IPv4: 127.0.0.1/8
-    /// For IPv6: ::1/128
+    /// For IPv6: `::1/128`
     pub exclude_loopback_ips: bool,
     /// Example: octocat@github.com
-    pub exclude_mail: bool,
+    pub include_mail: bool,
 }
 
 impl Filter {
     #[inline]
     #[must_use]
-    /// Whether e-mails aren't checked
+    /// Whether e-mails aren't checked (which is the default)
     pub fn is_mail_excluded(&self, uri: &Uri) -> bool {
-        self.exclude_mail && uri.is_mail()
+        uri.is_mail() && !self.include_mail
     }
 
     #[must_use]
@@ -156,7 +193,7 @@ impl Filter {
     /// # Details
     ///
     /// 1. If any of the following conditions are met, the URI is excluded:
-    ///   - If it's a mail address and it's configured to ignore mail addresses.
+    ///   - If it's a mail address and it's not configured to include mail addresses.
     ///   - If the IP address belongs to a type that is configured to exclude.
     ///   - If the host belongs to a type that is configured to exclude.
     ///   - If the scheme of URI is not the allowed scheme.
@@ -173,11 +210,13 @@ impl Filter {
     #[must_use]
     pub fn is_excluded(&self, uri: &Uri) -> bool {
         // Skip mail address, specific IP, specific host and scheme
-        if self.is_mail_excluded(uri)
-            || self.is_ip_excluded(uri)
+        if self.is_scheme_excluded(uri)
             || self.is_host_excluded(uri)
-            || self.is_scheme_excluded(uri)
+            || self.is_ip_excluded(uri)
+            || self.is_mail_excluded(uri)
+            || uri.is_tel()
             || is_example_domain(uri)
+            || is_unsupported_domain(uri)
         {
             return true;
         }
@@ -187,7 +226,7 @@ impl Filter {
         if self.is_includes_empty() {
             if self.is_excludes_empty() {
                 // Both excludes and includes rules are empty:
-                // *Presumably included* unless it's false positive
+                // *Presumably included* unless it's a false positive
                 return is_false_positive(input);
             }
         } else if self.is_includes_match(input) {
@@ -339,14 +378,25 @@ mod tests {
     }
 
     #[test]
-    fn test_exclude_mail() {
+    fn test_exclude_mail_by_default() {
         let filter = Filter {
-            exclude_mail: true,
             ..Filter::default()
         };
 
         assert!(filter.is_excluded(&mail("mail@example.com")));
         assert!(filter.is_excluded(&mail("foo@bar.dev")));
+        assert!(!filter.is_excluded(&website("http://bar.dev")));
+    }
+
+    #[test]
+    fn test_include_mail() {
+        let filter = Filter {
+            include_mail: true,
+            ..Filter::default()
+        };
+
+        assert!(!filter.is_excluded(&mail("mail@example.com")));
+        assert!(!filter.is_excluded(&mail("foo@bar.dev")));
         assert!(!filter.is_excluded(&website("http://bar.dev")));
     }
 
@@ -365,7 +415,7 @@ mod tests {
         assert!(filter.is_excluded(&mail("mail@example.com")));
 
         assert!(!filter.is_excluded(&website("http://bar.dev")));
-        assert!(!filter.is_excluded(&mail("foo@bar.dev")));
+        assert!(filter.is_excluded(&mail("foo@bar.dev")));
     }
     #[test]
     fn test_exclude_include_regex() {

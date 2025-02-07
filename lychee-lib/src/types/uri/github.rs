@@ -1,10 +1,11 @@
-use lazy_static::lazy_static;
 use std::collections::HashSet;
+
+use once_cell::sync::Lazy;
 
 use crate::{ErrorKind, Result, Uri};
 
-lazy_static! {
-    static ref GITHUB_API_EXCLUDED_ENDPOINTS: HashSet<&'static str> = HashSet::from_iter([
+static GITHUB_API_EXCLUDED_ENDPOINTS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    HashSet::from_iter([
         "about",
         "collections",
         "events",
@@ -19,10 +20,10 @@ lazy_static! {
         "sponsors",
         "topics",
         "watching",
-    ]);
-}
+    ])
+});
 
-/// Uri path segments extracted from a Github URL
+/// Uri path segments extracted from a GitHub URL
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct GithubUri {
     /// Organization name
@@ -34,7 +35,7 @@ pub struct GithubUri {
 }
 
 impl GithubUri {
-    /// Create a new Github URI without an endpoint
+    /// Create a new GitHub URI without an endpoint
     #[cfg(test)]
     fn new<T: Into<String>>(owner: T, repo: T) -> Self {
         GithubUri {
@@ -65,7 +66,7 @@ impl GithubUri {
         debug_assert!(!uri.is_mail(), "Should only be called on a Website type!");
 
         let Some(domain) = uri.domain() else {
-            return Err(ErrorKind::InvalidGithubUrl(uri.to_string()))
+            return Err(ErrorKind::InvalidGithubUrl(uri.to_string()));
         };
 
         if !matches!(
@@ -82,7 +83,7 @@ impl GithubUri {
 
         if parts.len() < 2 {
             // Not a valid org/repo pair.
-            // Note: We don't check for exactly 2 here, because the Github
+            // Note: We don't check for exactly 2 here, because the GitHub
             // API doesn't handle checking individual files inside repos or
             // paths like <github.com/org/repo/issues>, so we are more
             // permissive and only check for repo existence. This is the

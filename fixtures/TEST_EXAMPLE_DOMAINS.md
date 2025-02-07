@@ -6,8 +6,15 @@ http://example.org
 https://www.rust-lang.org/
 test@foo.example.org
 http://foo.example.org
+https://www.example.com
 mailto:foo@bar.dev
 mailto:hello@example.com?subject=hello
 http://example.net/foo/bar
 mail@example.com
 mail@somedomain.com
+
+https://test.localhost
+http://foo.bar.invalid
+foo.bar.invalid/some/path
+https://example.example
+http://integration.test

@@ -32,6 +32,7 @@ mod cli {
 
         let cmd = cmd
             .arg(input)
+            .arg("--include-mail")
             .arg("--dump")
             .assert()
             .success()
@@ -43,6 +44,28 @@ mod cli {
         let output = cmd.get_output();
         let output = std::str::from_utf8(&output.stdout).unwrap();
         assert_eq!(output.lines().count(), 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_do_not_exclude_false_positive_example_domains() -> Result<()> {
+        let mut cmd = main_command();
+        let input = fixtures_path().join("TEST_EXAMPLE_DOMAINS_FALSE_POSITIVES.md");
+
+        let cmd = cmd
+            .arg(input)
+            .arg("--include-mail")
+            .arg("--dump")
+            .assert()
+            .success()
+            .stdout(contains("https://examples.com"))
+            .stdout(contains("https://texample.net"))
+            .stdout(contains("http://gobyexample.com"));
+
+        let output = cmd.get_output();
+        let output = std::str::from_utf8(&output.stdout).unwrap();
+        assert_eq!(output.lines().count(), 8);
 
         Ok(())
     }

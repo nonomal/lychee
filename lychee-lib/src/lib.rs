@@ -43,13 +43,16 @@
     variant_size_differences,
     clippy::missing_const_for_fn
 )]
-#![deny(anonymous_parameters, macro_use_extern_crate, pointer_structural_match)]
+#![deny(anonymous_parameters, macro_use_extern_crate)]
 #![deny(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
 #[cfg(doctest)]
 doc_comment::doctest!("../../README.md");
 
+mod basic_auth;
+pub mod chain;
+mod checker;
 mod client;
 /// A pool of clients, to handle concurrent checks
 pub mod collector;
@@ -68,17 +71,23 @@ pub mod remap;
 /// local IPs or e-mail addresses
 pub mod filter;
 
+/// Test utilities
 #[cfg(test)]
 #[macro_use]
 pub mod test_utils;
 
 #[cfg(test)]
 use doc_comment as _; // required for doctest
-use openssl_sys as _; // required for vendored-openssl feature
 use ring as _; // required for apple silicon
+
+#[cfg(feature = "native-tls")]
+use openssl_sys as _; // required for vendored-openssl feature
 
 #[doc(inline)]
 pub use crate::{
+    basic_auth::BasicAuthExtractor,
+    // Expose the `Handler` trait to allow defining external handlers (plugins)
+    chain::{ChainResult, Handler},
     // Constants get exposed so that the CLI can use the same defaults as the library
     client::{
         check, Client, ClientBuilder, DEFAULT_MAX_REDIRECTS, DEFAULT_MAX_RETRIES,
@@ -87,7 +96,9 @@ pub use crate::{
     collector::Collector,
     filter::{Excludes, Filter, Includes},
     types::{
-        uri::valid::Uri, Base, CacheStatus, ErrorKind, FileType, Input, InputContent, InputSource,
-        Request, Response, ResponseBody, Result, Status,
+        uri::valid::Uri, AcceptRange, AcceptRangeError, Base, BasicAuthCredentials,
+        BasicAuthSelector, CacheStatus, CookieJar, ErrorKind, FileType, Input, InputContent,
+        InputSource, Request, Response, ResponseBody, Result, Status, StatusCodeExcluder,
+        StatusCodeSelector,
     },
 };

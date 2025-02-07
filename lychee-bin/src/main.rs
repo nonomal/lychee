@@ -55,7 +55,7 @@
     variant_size_differences,
     clippy::missing_const_for_fn
 )]
-#![deny(anonymous_parameters, macro_use_extern_crate, pointer_structural_match)]
+#![deny(anonymous_parameters, macro_use_extern_crate)]
 #![deny(missing_docs)]
 
 use std::fs::{self, File};
@@ -63,23 +63,25 @@ use std::io::{self, BufRead, BufReader, ErrorKind, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Error, Result};
+use anyhow::{bail, Context, Error, Result};
 use clap::Parser;
-use color::YELLOW;
 use commands::CommandParams;
-use formatters::response::ResponseFormatter;
+use formatters::{get_stats_formatter, log::init_logging};
 use log::{error, info, warn};
-use openssl_sys as _;
+
+#[cfg(feature = "native-tls")]
+use openssl_sys as _; // required for vendored-openssl feature
+
 use options::LYCHEE_CONFIG_FILE;
-// required for vendored-openssl feature
 use ring as _; // required for apple silicon
 
+use lychee_lib::BasicAuthExtractor;
 use lychee_lib::Collector;
+use lychee_lib::CookieJar;
 
 mod archive;
 mod cache;
 mod client;
-mod color;
 mod commands;
 mod formatters;
 mod options;
@@ -88,15 +90,16 @@ mod stats;
 mod time;
 mod verbosity;
 
+use crate::formatters::color;
 use crate::formatters::duration::Duration;
 use crate::{
     cache::{Cache, StoreExt},
-    color::color,
     formatters::stats::StatsFormatter,
-    options::{Config, Format, LycheeOptions, LYCHEE_CACHE_FILE, LYCHEE_IGNORE_FILE},
+    options::{Config, LycheeOptions, LYCHEE_CACHE_FILE, LYCHEE_IGNORE_FILE},
 };
 
 /// A C-like enum that can be cast to `i32` and used as process exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitCode {
     Success = 0,
     // NOTE: exit code 1 is used for any `Result::Err` bubbled up to `main()`
@@ -113,10 +116,8 @@ enum ExitCode {
 const LYCHEEIGNORE_COMMENT_MARKER: &str = "#";
 
 fn main() -> Result<()> {
-    #[cfg(feature = "tokio-console")]
-    console_subscriber::init();
-    // std::process::exit doesn't guarantee that all destructors will be ran,
-    // therefore we wrap "main" code in another function to ensure that.
+    // std::process::exit doesn't guarantee that all destructors will be run,
+    // therefore we wrap the main code in another function to ensure that.
     // See: https://doc.rust-lang.org/stable/std/process/fn.exit.html
     // Also see: https://www.youtube.com/watch?v=zQC8T71Y8e4
     let exit_code = run_main()?;
@@ -139,15 +140,7 @@ fn read_lines(file: &File) -> Result<Vec<String>> {
 fn load_config() -> Result<LycheeOptions> {
     let mut opts = LycheeOptions::parse();
 
-    env_logger::Builder::new()
-        // super basic formatting; no timestamps, no module path, no target
-        .format_timestamp(None)
-        .format_indent(Some(0))
-        .format_module_path(false)
-        .format_target(false)
-        .filter_module("lychee", opts.config.verbose.log_level_filter())
-        .filter_module("lychee_lib", opts.config.verbose.log_level_filter())
-        .init();
+    init_logging(&opts.config.verbose, &opts.config.mode);
 
     // Load a potentially existing config file and merge it into the config from
     // the CLI
@@ -155,8 +148,10 @@ fn load_config() -> Result<LycheeOptions> {
         match Config::load_from_file(config_file) {
             Ok(c) => opts.config.merge(c),
             Err(e) => {
-                error!("Error while loading config file {:?}: {}", config_file, e);
-                std::process::exit(ExitCode::ConfigFile as i32);
+                bail!(
+                    "Cannot load configuration file `{}`: {e:?}",
+                    config_file.display()
+                );
             }
         }
     } else {
@@ -172,9 +167,14 @@ fn load_config() -> Result<LycheeOptions> {
         opts.config.exclude.append(&mut read_lines(&lycheeignore)?);
     }
 
-    // TODO: Remove this warning and the parameter in a future release
+    // TODO: Remove this warning and the parameter with 1.0
     if !&opts.config.exclude_file.is_empty() {
-        warn!("WARNING: `--exclude-file` is deprecated and will soon be removed; use `{}` file to ignore URL patterns instead. To exclude paths of files and directories, use `--exclude-path`.", LYCHEE_IGNORE_FILE);
+        warn!("WARNING: `--exclude-file` is deprecated and will soon be removed; use the `{}` file to ignore URL patterns instead. To exclude paths of files and directories, use `--exclude-path`.", LYCHEE_IGNORE_FILE);
+    }
+
+    // TODO: Remove this warning and the parameter with 1.0
+    if opts.config.exclude_mail {
+        warn!("WARNING: `--exclude-mail` is deprecated and will soon be removed; E-Mail is no longer checked by default. Use `--include-mail` to enable E-Mail checking.");
     }
 
     // Load excludes from file
@@ -184,6 +184,14 @@ fn load_config() -> Result<LycheeOptions> {
     }
 
     Ok(opts)
+}
+
+/// Load cookie jar from path (if exists)
+fn load_cookie_jar(cfg: &Config) -> Result<Option<CookieJar>> {
+    match &cfg.cookie_jar {
+        Some(path) => Ok(CookieJar::load(path.clone()).map(Some)?),
+        None => Ok(None),
+    }
 }
 
 #[must_use]
@@ -236,7 +244,13 @@ fn load_cache(cfg: &Config) -> Option<Cache> {
 fn run_main() -> Result<i32> {
     use std::process::exit;
 
-    let opts = load_config()?;
+    let opts = match load_config() {
+        Ok(opts) => opts,
+        Err(e) => {
+            error!("Error while loading config: {e}");
+            exit(ExitCode::ConfigFile as i32);
+        }
+    };
 
     let runtime = match opts.config.threads {
         Some(threads) => {
@@ -273,25 +287,54 @@ fn underlying_io_error_kind(error: &Error) -> Option<io::ErrorKind> {
 /// Run lychee on the given inputs
 async fn run(opts: &LycheeOptions) -> Result<i32> {
     let inputs = opts.inputs()?;
-    let requests = Collector::new(opts.config.base.clone())
+
+    let mut collector = Collector::new(opts.config.root_dir.clone(), opts.config.base.clone())?
         .skip_missing_inputs(opts.config.skip_missing)
+        .skip_hidden(!opts.config.hidden)
+        .skip_ignored(!opts.config.no_ignore)
         .include_verbatim(opts.config.include_verbatim)
         // File a bug if you rely on this envvar! It's going to go away eventually.
-        .use_html5ever(std::env::var("LYCHEE_USE_HTML5EVER").map_or(false, |x| x == "1"))
-        .collect_links(inputs)
-        .await;
-    let client = client::create(&opts.config)?;
+        .use_html5ever(std::env::var("LYCHEE_USE_HTML5EVER").is_ok_and(|x| x == "1"));
+
+    if opts.config.dump_inputs {
+        let sources = collector.collect_sources(inputs);
+        let exit_code = commands::dump_inputs(
+            sources,
+            opts.config.output.as_ref(),
+            &opts.config.exclude_path,
+        )
+        .await?;
+
+        return Ok(exit_code as i32);
+    }
+
+    collector = if let Some(ref basic_auth) = opts.config.basic_auth {
+        collector.basic_auth_extractor(BasicAuthExtractor::new(basic_auth)?)
+    } else {
+        collector
+    };
+
+    let requests = collector.collect_links(inputs);
+
     let cache = load_cache(&opts.config).unwrap_or_default();
     let cache = Arc::new(cache);
 
-    let response_formatter: Box<dyn ResponseFormatter> =
-        formatters::get_formatter(&opts.config.format);
+    let cookie_jar = load_cookie_jar(&opts.config).with_context(|| {
+        format!(
+            "Cannot load cookie jar from path `{}`",
+            opts.config
+                .cookie_jar
+                .as_ref()
+                .map_or_else(|| "<none>".to_string(), |p| p.display().to_string())
+        )
+    })?;
+
+    let client = client::create(&opts.config, cookie_jar.as_deref())?;
 
     let params = CommandParams {
         client,
         cache,
         requests,
-        formatter: response_formatter,
         cfg: opts.config.clone(),
     };
 
@@ -301,24 +344,20 @@ async fn run(opts: &LycheeOptions) -> Result<i32> {
         let (stats, cache, exit_code) = commands::check(params).await?;
 
         let github_issues = stats
-            .fail_map
+            .error_map
             .values()
             .flatten()
             .any(|body| body.uri.domain() == Some("github.com"));
 
-        let writer: Box<dyn StatsFormatter> = match opts.config.format {
-            Format::Compact => Box::new(formatters::stats::Compact::new()),
-            Format::Detailed => Box::new(formatters::stats::Detailed::new()),
-            Format::Json => Box::new(formatters::stats::Json::new()),
-            Format::Markdown => Box::new(formatters::stats::Markdown::new()),
-            Format::Raw => Box::new(formatters::stats::Raw::new()),
-        };
-        let is_empty = stats.is_empty();
-        let formatted = writer.format_stats(stats)?;
+        let stats_formatter: Box<dyn StatsFormatter> =
+            get_stats_formatter(&opts.config.format, &opts.config.mode);
 
-        if let Some(formatted) = formatted {
+        let is_empty = stats.is_empty();
+        let formatted_stats = stats_formatter.format(stats)?;
+
+        if let Some(formatted_stats) = formatted_stats {
             if let Some(output) = &opts.config.output {
-                fs::write(output, formatted).context("Cannot write status output to file")?;
+                fs::write(output, formatted_stats).context("Cannot write status output to file")?;
             } else {
                 if opts.config.verbose.log_level() >= log::Level::Info && !is_empty {
                     // separate summary from the verbose list of links above
@@ -326,18 +365,23 @@ async fn run(opts: &LycheeOptions) -> Result<i32> {
                     writeln!(io::stdout())?;
                 }
                 // we assume that the formatted stats don't have a final newline
-                writeln!(io::stdout(), "{formatted}")?;
+                writeln!(io::stdout(), "{formatted_stats}")?;
             }
         }
 
         if github_issues && opts.config.github_token.is_none() {
-            let mut f = io::stdout();
-            color!(f, YELLOW, "\u{1f4a1} There were issues with Github URLs. You could try setting a Github token and running lychee again.",)?;
+            warn!("There were issues with GitHub URLs. You could try setting a GitHub token and running lychee again.",);
         }
 
         if opts.config.cache {
             cache.store(LYCHEE_CACHE_FILE)?;
         }
+
+        if let Some(cookie_jar) = cookie_jar.as_ref() {
+            info!("Saving cookie jar");
+            cookie_jar.save().context("Cannot save cookie jar")?;
+        }
+
         exit_code
     };
 

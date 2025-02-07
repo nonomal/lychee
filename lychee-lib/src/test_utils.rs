@@ -10,8 +10,8 @@ use crate::{ClientBuilder, ErrorKind, Request, Uri};
 macro_rules! mock_server {
     ($status:expr $(, $func:tt ($($arg:expr),*))*) => {{
         let mock_server = wiremock::MockServer::start().await;
-        let template = wiremock::ResponseTemplate::new(http::StatusCode::from($status));
-        let template = template$(.$func($($arg),*))*;
+        let response_template = wiremock::ResponseTemplate::new(http::StatusCode::from($status));
+        let template = response_template$(.$func($($arg),*))*;
         wiremock::Mock::given(wiremock::matchers::method("GET")).respond_with(template).mount(&mock_server).await;
         mock_server
     }};
@@ -37,6 +37,16 @@ where
 /// This panics on error, so it should only be used for testing
 pub(crate) fn website(url: &str) -> Uri {
     Uri::from(Url::parse(url).expect("Expected valid Website URI"))
+}
+
+/// Helper method to convert a `std::path::Path `into a URI with the `file` scheme
+///
+/// # Panic
+///
+/// This panics if the given path is not absolute, so it should only be used for
+/// testing
+pub(crate) fn path<P: AsRef<Path>>(path: P) -> Uri {
+    Uri::from(Url::from_file_path(path.as_ref()).expect("Expected valid File URI"))
 }
 
 /// Creates a mail URI from a string

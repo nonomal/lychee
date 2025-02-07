@@ -54,13 +54,10 @@ impl<P: AsRef<Path>> From<P> for FileType {
 }
 
 /// Helper function to check if a path is likely a URL.
-
 fn is_url(path: &Path) -> bool {
     path.to_str()
         .and_then(|s| Url::parse(s).ok())
-        .map_or(false, |url| {
-            url.scheme() == "http" || url.scheme() == "https"
-        })
+        .is_some_and(|url| url.scheme() == "http" || url.scheme() == "https")
 }
 
 #[cfg(test)]

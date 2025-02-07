@@ -22,13 +22,10 @@ pub struct Uri {
 
 impl Uri {
     /// Returns the string representation of the `Uri`.
-    ///
-    /// If it's an email address, returns the string with scheme stripped.
-    /// Otherwise returns the string as-is.
     #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
-        self.url.as_ref().trim_start_matches("mailto:")
+        self.url.as_ref()
     }
 
     #[inline]
@@ -85,7 +82,7 @@ impl Uri {
         let mut https_uri = self.clone();
         https_uri
             .set_scheme("https")
-            .map_err(|_| ErrorKind::InvalidURI(self.clone()))?;
+            .map_err(|()| ErrorKind::InvalidURI(self.clone()))?;
         Ok(https_uri)
     }
 
@@ -94,6 +91,13 @@ impl Uri {
     /// Check if the URI is a valid mail address
     pub fn is_mail(&self) -> bool {
         self.scheme() == "mailto"
+    }
+
+    #[inline]
+    #[must_use]
+    /// Check if the URI is a tel
+    pub fn is_tel(&self) -> bool {
+        self.scheme() == "tel"
     }
 
     #[inline]
@@ -326,6 +330,14 @@ mod tests {
     }
 
     #[test]
+    fn test_uri_tel() {
+        assert_eq!(
+            Uri::try_from("tel:1234567890"),
+            Ok(Uri::try_from("tel:1234567890").unwrap())
+        );
+    }
+
+    #[test]
     fn test_uri_host_ip_v4() {
         assert_eq!(
             website("http://127.0.0.1").host_ip(),
@@ -365,5 +377,10 @@ mod tests {
             website("https://example.com").to_https().unwrap(),
             website("https://example.com")
         );
+    }
+
+    #[test]
+    fn test_file_uri() {
+        assert!(Uri::try_from("file:///path/to/file").unwrap().is_file());
     }
 }

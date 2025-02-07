@@ -1,8 +1,9 @@
+<a name="back-to-top"></a>
 ![lychee](assets/logo.svg)
 
 [![Homepage](https://img.shields.io/badge/Homepage-Online-EA3A97)](https://lycheeverse.github.io)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-lychee-blue.svg?colorA=24292e&colorB=0366d6&style=flat&longCache=true&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA4AAAAOCAYAAAAfSC3RAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAM6wAADOsB5dZE0gAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAERSURBVCiRhZG/SsMxFEZPfsVJ61jbxaF0cRQRcRJ9hlYn30IHN/+9iquDCOIsblIrOjqKgy5aKoJQj4O3EEtbPwhJbr6Te28CmdSKeqzeqr0YbfVIrTBKakvtOl5dtTkK+v4HfA9PEyBFCY9AGVgCBLaBp1jPAyfAJ/AAdIEG0dNAiyP7+K1qIfMdonZic6+WJoBJvQlvuwDqcXadUuqPA1NKAlexbRTAIMvMOCjTbMwl1LtI/6KWJ5Q6rT6Ht1MA58AX8Apcqqt5r2qhrgAXQC3CZ6i1+KMd9TRu3MvA3aH/fFPnBodb6oe6HM8+lYHrGdRXW8M9bMZtPXUji69lmf5Cmamq7quNLFZXD9Rq7v0Bpc1o/tp0fisAAAAASUVORK5CYII=)](https://github.com/marketplace/actions/lychee-broken-link-checker)
-![Rust](https://github.com/hello-rust/lychee/workflows/CI/badge.svg)
+[![Rust](https://github.com/hello-rust/lychee/workflows/CI/badge.svg)](https://github.com/lycheeverse/lychee/actions/workflows/ci.yml)
 [![docs.rs](https://docs.rs/lychee-lib/badge.svg)](https://docs.rs/lychee-lib)
 [![Check Links](https://github.com/lycheeverse/lychee/actions/workflows/links.yml/badge.svg)](https://github.com/lycheeverse/lychee/actions/workflows/links.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/lycheeverse/lychee?color=%23099cec&logo=Docker)](https://hub.docker.com/r/lycheeverse/lychee)
@@ -15,6 +16,31 @@ Available as a command-line utility, a library and a [GitHub Action](https://git
 
 ![Lychee demo](./assets/screencast.svg)
 
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+## Table of Contents
+
+- [Development](#development)
+- [Installation](#installation)
+- [Features](#features)
+- [Commandline usage](#commandline-usage)
+- [Library usage](#library-usage)
+- [GitHub Action Usage](#github-action-usage)
+- [Pre-commit Usage](#pre-commit-usage)
+- [Contributing to lychee](#contributing-to-lychee)
+- [Troubleshooting and Workarounds](#troubleshooting-and-workarounds)
+- [Users](#users)
+- [Credits](#credits)
+- [License](#license)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
+## Development
+
+After [installing Rust](https://www.rust-lang.org/tools/install) use [Cargo](https://doc.rust-lang.org/cargo/) for building and testing.
+On Linux the OpenSSL package [is required](https://github.com/seanmonstar/reqwest?tab=readme-ov-file#requirements) to compile `reqwest`, a dependency of lychee.
+For Nix we provide a flake so you can use `nix develop` and `nix build`.
+
 ## Installation
 
 ### Arch Linux
@@ -23,10 +49,24 @@ Available as a command-line utility, a library and a [GitHub Action](https://git
 pacman -S lychee
 ```
 
+### OpenSUSE Tumbleweed
+
+```sh
+zypper in lychee
+```
+
 ### macOS
+
+Via [Homebrew](https://brew.sh):
 
 ```sh
 brew install lychee
+```
+
+Via [MacPorts](https://www.macports.org):
+
+```sh
+sudo port install lychee
 ```
 
 ### Docker
@@ -40,6 +80,13 @@ docker pull lycheeverse/lychee
 ```sh
 nix-env -iA nixos.lychee
 ```
+
+### Nixpkgs
+
+- [`lychee` package](https://search.nixos.org/packages?show=lychee&query=lychee) for configurations, Nix shells, etc.
+
+- Let Nix check a packaged site with \
+  [`testers.lycheeLinkCheck`](https://nixos.org/manual/nixpkgs/stable/#tester-lycheeLinkCheck) `{ site = …; }`
 
 ### FreeBSD
 
@@ -57,6 +104,19 @@ scoop install lychee
 
 ```sh
 pkg install lychee
+```
+
+### Alpine Linux
+
+```sh
+ # available for Alpine Edge in testing repositories
+apk add lychee
+```
+
+### Chocolatey (Windows)
+
+```sh
+choco install lychee
 ```
 
 ### Pre-built binaries
@@ -83,6 +143,18 @@ apt install gcc pkg-config libc6-dev libssl-dev
 cargo install lychee
 ```
 
+#### Feature flags
+
+Lychee supports several feature flags:
+
+- `native-tls` enables the platform-native TLS crate [native-tls](https://crates.io/crates/native-tls).
+- `vendored-openssl` compiles and statically links a copy of OpenSSL. See the corresponding feature of the [openssl](https://crates.io/crates/openssl) crate.
+- `rustls-tls` enables the alternative TLS crate [rustls](https://crates.io/crates/rustls).
+- `email-check` enables checking email addresses using the [check-if-email-exists](https://crates.io/crates/check-if-email-exists) crate. This feature requires the `native-tls` feature.
+- `check_example_domains` allows checking example domains such as `example.com`. This feature is useful for testing.
+
+By default, `native-tls` and `email-check` are enabled.
+
 ## Features
 
 This comparison is made on a best-effort basis. Please create a PR to fix
@@ -93,7 +165,7 @@ outdated information.
 | Language             | Rust    | Ruby          | Go       | JS                    | TypeScript   | Python               | JS                    | PHP    |
 | Async/Parallel       | ![yes]  | ![yes]        | ![yes]   | ![yes]                | ![yes]       | ![yes]               | ![yes]                | ![yes] |
 | JSON output          | ![yes]  | ![no]         | ![yes]   | ![yes]                | ![yes]       | ![maybe]<sup>1</sup> | ![yes]                | ![yes] |
-| Static binary        | ![yes]  | ![no]         | ![yes]   | ![no]                 | ![no]        | ️![no]               | ![no]                 | ![no]  |
+| Static binary        | ![yes]  | ![no]         | ![yes]   | ![no]                 | ![no]        | ️![no]                | ![no]                 | ![no]  |
 | Markdown files       | ![yes]  | ![yes]        | ![no]    | ![no]                 | ![no]        | ![yes]               | ![yes]                | ![no]  |
 | HTML files           | ![yes]  | ![no]         | ![no]    | ![yes]                | ![yes]       | ![no]                | ![yes]                | ![no]  |
 | Text files           | ![yes]  | ![no]         | ![no]    | ![no]                 | ![no]        | ![no]                | ![no]                 | ![no]  |
@@ -103,8 +175,9 @@ outdated information.
 | Basic Auth           | ![yes]  | ![no]         | ![no]    | ![yes]                | ![no]        | ![yes]               | ![no]                 | ![no]  |
 | Custom user agent    | ![yes]  | ![no]         | ![no]    | ![yes]                | ![no]        | ![yes]               | ![no]                 | ![no]  |
 | Relative URLs        | ![yes]  | ![yes]        | ![no]    | ![yes]                | ![yes]       | ![yes]               | ![yes]                | ![yes] |
+| Anchors/Fragments    | ![yes]  | ![no]         | ![no]    | ![no]                 | ![no]        | ![yes]               | ![yes]                | ![no]  |
 | Skip relative URLs   | ![yes]  | ![no]         | ![no]    | ![maybe]              | ![no]        | ![no]                | ![no]                 | ![no]  |
-| Include patterns     | ![yes]️ | ![yes]        | ![no]    | ![yes]                | ![no]        | ![no]                | ![no]                 | ![no]  |
+| Include patterns     | ![yes]️  | ![yes]        | ![no]    | ![yes]                | ![no]        | ![no]                | ![no]                 | ![no]  |
 | Exclude patterns     | ![yes]  | ![no]         | ![yes]   | ![yes]                | ![yes]       | ![yes]               | ![yes]                | ![yes] |
 | Handle redirects     | ![yes]  | ![yes]        | ![yes]   | ![yes]                | ![yes]       | ![yes]               | ![yes]                | ![yes] |
 | Ignore insecure SSL  | ![yes]  | ![yes]        | ![yes]   | ![no]                 | ![no]        | ![yes]               | ![no]                 | ![yes] |
@@ -123,6 +196,7 @@ outdated information.
 | [Use as library]     | ![yes]  | ![yes]        | ![no]    | ![yes]                | ![yes]       | ![no]                | ![yes]                | ![no]  |
 | Quiet mode           | ![yes]  | ![no]         | ![no]    | ![no]                 | ![yes]       | ![yes]               | ![yes]                | ![yes] |
 | [Config file]        | ![yes]  | ![no]         | ![no]    | ![no]                 | ![yes]       | ![yes]               | ![yes]                | ![no]  |
+| Cookies              | ![yes]  | ![no]         | ![yes]   | ![no]                 | ![no]        | ![yes]               | ![no]                 | ![yes] |
 | Recursion            | ![no]   | ![no]         | ![yes]   | ![yes]                | ![yes]       | ![yes]               | ![yes]                | ![no]  |
 | Amazing lychee logo  | ![yes]  | ![no]         | ![no]    | ![no]                 | ![no]        | ![no]                | ![no]                 | ![no]  |
 
@@ -188,28 +262,49 @@ but in case you need dedicated support for a new file format, please consider cr
 ### Docker Usage
 
 Here's how to mount a local directory into the container and check some input
-with lychee. The `--init` parameter is passed so that lychee can be stopped
-from the terminal. We also pass `-it` to start an interactive terminal, which
-is required to show the progress bar.
+with lychee.
+
+- The `--init` parameter is passed so that lychee can be stopped from the terminal.
+- We also pass `-it` to start an interactive terminal, which is required to show the progress bar.
+- The `--rm` removes not used anymore container from the host after the run (self-cleanup).
+- The `-w /input` points to `/input` as the default workspace
+- The `-v $(pwd):/input` does local volume mounting to the container for lychee access.
+
+> By default a Debian-based Docker image is used. If you want to run an Alpine-based image, use the `latest-alpine` tag.
+> For example, `lycheeverse/lychee:latest-alpine`
+
+#### Linux/macOS shell command
 
 ```sh
-docker run --init -it -v `pwd`:/input lycheeverse/lychee /input/README.md
+docker run --init -it --rm -w /input -v $(pwd):/input lycheeverse/lychee README.md
+```
+
+#### Windows PowerShell command
+
+```powershell
+docker run --init -it --rm -w /input -v ${PWD}:/input lycheeverse/lychee README.md
 ```
 
 ### GitHub Token
 
 To avoid getting rate-limited while checking GitHub links, you can optionally
-set an environment variable with your Github token like so `GITHUB_TOKEN=xxxx`,
+set an environment variable with your GitHub token like so `GITHUB_TOKEN=xxxx`,
 or use the `--github-token` CLI option. It can also be set in the config file.
 [Here is an example config file][config file].
 
-The token can be generated in your
-[GitHub account settings page](https://github.com/settings/tokens). A personal
-token with no extra permissions is enough to be able to check public repos links.
+The token can be generated on your [GitHub account settings page](https://github.com/settings/tokens).
+A personal access token with no extra permissions is enough to be able to check public repo links.
+
+For more scalable organization-wide scenarios you can consider a [GitHub App][github-app-overview].
+It has a higher rate limit than personal access tokens but requires additional configuration steps on your GitHub workflow.
+Please follow the [GitHub App Setup][github-app-setup] example.
+
+[github-app-overview]: https://docs.github.com/en/apps/overview
+[github-app-setup]: https://github.com/github/combine-prs/blob/main/docs/github-app-setup.md#github-app-setup
 
 ### Commandline Parameters
 
-There is an extensive list of commandline parameters to customize the behavior.
+There is an extensive list of command line parameters to customize the behavior.
 See below for a full list.
 
 ```text
@@ -226,7 +321,7 @@ Arguments:
 Options:
   -c, --config <CONFIG_FILE>
           Configuration file to use
-          
+
           [default: lychee.toml]
 
   -v, --verbose...
@@ -244,15 +339,34 @@ Options:
 
       --max-cache-age <MAX_CACHE_AGE>
           Discard all cached requests older than this duration
-          
+
           [default: 1d]
+
+      --cache-exclude-status <CACHE_EXCLUDE_STATUS>
+          A list of status codes that will be ignored from the cache
+
+          The following accept range syntax is supported: [start]..[=]end|code. Some valid
+          examples are:
+
+          - 429
+          - 500..=599
+          - 500..
+
+          Use "lychee --cache-exclude-status '429, 500..502' <inputs>..." to provide a comma- separated
+          list of excluded status codes. This example will not cache results with a status code of 429, 500,
+          501 and 502.
+
+          [default: ]
 
       --dump
           Don't perform any link checking. Instead, dump all the links extracted from inputs that would be checked
 
+      --dump-inputs
+          Don't perform any link extraction and checking. Instead, dump all input sources from which links would be collected
+
       --archive <ARCHIVE>
           Specify the use of a specific web archive. Can be used in combination with `--suggest`
-          
+
           [possible values: wayback]
 
       --suggest
@@ -260,17 +374,17 @@ Options:
 
   -m, --max-redirects <MAX_REDIRECTS>
           Maximum number of allowed redirects
-          
+
           [default: 5]
 
       --max-retries <MAX_RETRIES>
           Maximum number of retries per request
-          
+
           [default: 3]
 
       --max-concurrency <MAX_CONCURRENCY>
           Maximum number of concurrent network requests
-          
+
           [default: 128]
 
   -T, --threads <THREADS>
@@ -278,14 +392,14 @@ Options:
 
   -u, --user-agent <USER_AGENT>
           User agent
-          
-          [default: lychee/0.13.0]
+
+          [default: lychee/x.y.z]
 
   -i, --insecure
           Proceed for server connections considered insecure (invalid TLS)
 
   -s, --scheme <SCHEME>
-          Only test links with the given schemes (e.g. http and https)
+          Only test links with the given schemes (e.g. https). Omit to check links with any other scheme. At the moment, we support http, https, file, and mailto
 
       --offline
           Only check local files and block network requests
@@ -316,45 +430,82 @@ Options:
           Exclude loopback IP address range and localhost from checking
 
       --exclude-mail
-          Exclude all mail addresses from checking
+          Exclude all mail addresses from checking (deprecated; excluded by default)
+
+      --include-mail
+          Also check email addresses
 
       --remap <REMAP>
           Remap URI matching pattern to different URI
+
+      --fallback-extensions <FALLBACK_EXTENSIONS>
+          Test the specified file extensions for URIs when checking files locally.
+          Multiple extensions can be separated by commas. Extensions will be checked in
+          order of appearance.
+
+          Example: --fallback-extensions html,htm,php,asp,aspx,jsp,cgi
 
       --header <HEADER>
           Custom request header
 
   -a, --accept <ACCEPT>
-          Comma-separated list of accepted status codes for valid links
+          A List of accepted status codes for valid links
+
+          The following accept range syntax is supported: [start]..[=]end|code. Some valid
+          examples are:
+
+          - 200..=204
+          - 200..204
+          - ..=204
+          - ..204
+          - 200
+
+          Use "lychee --accept '200..=204, 429, 500' <inputs>..." to provide a comma-
+          separated list of accepted status codes. This example will accept 200, 201,
+          202, 203, 204, 429, and 500 as valid status codes.
+
+          [default: 100..=103,200..=299]
+
+      --include-fragments
+          Enable the checking of fragments in links
 
   -t, --timeout <TIMEOUT>
           Website timeout in seconds from connect to response finished
-          
+
           [default: 20]
 
   -r, --retry-wait-time <RETRY_WAIT_TIME>
           Minimum wait time in seconds between retries of failed requests
-          
+
           [default: 1]
 
   -X, --method <METHOD>
           Request method
-          
+
           [default: get]
 
   -b, --base <BASE>
-          Base URL or website root directory to check relative URLs e.g. https://example.com or `/path/to/public`
+          Base URL or website root directory to check relative URLs e.g. <https://example.com> or `/path/to/public`
+
+      --root-dir <ROOT_DIR>
+          Root path to use when checking absolute local links, must be an absolute path
 
       --basic-auth <BASIC_AUTH>
-          Basic authentication support. E.g. `username:password`
+          Basic authentication support. E.g. `http://example.com username:password`
 
       --github-token <GITHUB_TOKEN>
           GitHub API token to use when checking github.com links, to avoid rate limiting
-          
+
           [env: GITHUB_TOKEN]
 
       --skip-missing
           Skip missing input files (default is to error if they don't exist)
+
+      --no-ignore
+          Do not skip files that would otherwise be ignored by '.gitignore', '.ignore', or the global ignore file
+
+      --hidden
+          Do not skip hidden directories and files
 
       --include-verbatim
           Find links in verbatim sections like `pre`- and `code` blocks
@@ -365,20 +516,29 @@ Options:
   -o, --output <OUTPUT>
           Output file of status report
 
+      --mode <MODE>
+          Set the output display mode. Determines how results are presented in the terminal
+
+          [default: color]
+          [possible values: plain, color, emoji, task]
+
   -f, --format <FORMAT>
-          Output format of final status report (compact, detailed, json, markdown)
-          
+          Output format of final status report
+
           [default: compact]
+          [possible values: compact, detailed, json, markdown, raw]
 
       --require-https
           When HTTPS is available, treat HTTP links as errors
+
+      --cookie-jar <COOKIE_JAR>
+          Tell lychee to read cookies from the given file. Cookies will be stored in the cookie jar and sent with requests. New cookies will be stored in the cookie jar and existing cookies will be updated
 
   -h, --help
           Print help (see a summary with '-h')
 
   -V, --version
           Print version
-
 ```
 
 ### Exit codes
@@ -386,14 +546,34 @@ Options:
 - `0` for success (all links checked successfully or excluded/skipped as configured)
 - `1` for missing inputs and any unexpected runtime failures or config errors
 - `2` for link check failures (if any non-excluded link failed the check)
+- `3` for errors in the config file
 
 ### Ignoring links
 
 You can exclude links from getting checked by specifying regex patterns
 with `--exclude` (e.g. `--exclude example\.(com|org)`).
-If a file named `.lycheeignore` exists in the current working directory, its
-contents are excluded as well. The file allows you to list multiple regular
-expressions for exclusion (one pattern per line).
+
+Here are some examples:
+
+```bash
+# Exclude LinkedIn URLs (note that we match on the full URL, including the schema to avoid false-positives)
+lychee --exclude '^https://www\.linkedin\.com'
+
+# Exclude LinkedIn and Archive.org URLs
+lychee --exclude '^https://www\.linkedin\.com' --exclude '^https://web\.archive\.org/web/'
+
+# Exclude all links to PDF files
+lychee --exclude '\.pdf$' .
+
+# Exclude links to specific domains
+lychee --exclude '(facebook|twitter|linkedin)\.com' .
+
+# Exclude links with certain URL parameters
+lychee --exclude '\?utm_source=' .
+
+# Exclude all mailto links
+lychee --exclude '^mailto:' .
+```
 
 For excluding files/directories from being scanned use `lychee.toml`
 and `exclude_path`.
@@ -401,6 +581,12 @@ and `exclude_path`.
 ```toml
 exclude_path = ["some/path", "*/dev/*"]
 ```
+
+If a file named `.lycheeignore` exists in the current working directory, its
+contents are excluded as well. The file allows you to list multiple regular
+expressions for exclusion (one pattern per line).
+
+For more advanced usage and detailed explanations, check out our comprehensive [guide on excluding links](https://lychee.cli.rs/recipes/excluding-links/).
 
 ### Caching
 
@@ -469,10 +655,31 @@ folder.
 A GitHub Action that uses lychee is available as a separate repository: [lycheeverse/lychee-action](https://github.com/lycheeverse/lychee-action)
 which includes usage instructions.
 
+## Pre-commit Usage
+
+Lychee can also be used as a [pre-commit](https://pre-commit.com/) hook.
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/lycheeverse/lychee.git
+    rev: v0.15.1
+    hooks:
+      - id: lychee
+        # Optionally include additional CLI arguments
+        args: ["--no-progress", "--exclude", "file://"]
+```
+
+Rather than running on staged-files only, Lychee can be run against an entire repository.
+```yaml
+- id: lychee
+  args: ["--no-progress", "."]
+  pass_filenames: false
+```
+
 ## Contributing to lychee
 
 We'd be thankful for any contribution. \
-We try to keep the issue-tracker up-to-date so you can quickly find a task to work on.
+We try to keep the issue tracker up-to-date so you can quickly find a task to work on.
 
 Try one of these links to get started:
 
@@ -480,30 +687,6 @@ Try one of these links to get started:
 - [help wanted](https://github.com/lycheeverse/lychee/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
 
 For more detailed instructions, head over to [`CONTRIBUTING.md`](/CONTRIBUTING.md).
-
-## Debugging and improving async code
-
-Lychee makes heavy use of async code to be resource-friendly while still being
-performant. Async code can be difficult to troubleshoot with most tools,
-however. Therefore we provide experimental support for
-[tokio-console](https://github.com/tokio-rs/console). It provides a top(1)-like
-overview for async tasks!
-
-If you want to give it a spin, download and start the console:
-
-```sh
-git clone https://github.com/tokio-rs/console
-cd console
-cargo run
-```
-
-Then run lychee with some special flags and features enabled.
-
-```sh
-RUSTFLAGS="--cfg tokio_unstable" cargo run --features tokio-console -- <input1> <input2> ...
-```
-
-If you find a way to make lychee faster, please do reach out.
 
 ## Troubleshooting and Workarounds
 
@@ -517,7 +700,6 @@ We collect a list of common workarounds for various websites in our [troubleshoo
 - https://github.com/papers-we-love/papers-we-love
 - https://github.com/pingcap/docs
 - https://github.com/microsoft/WhatTheHack
-- https://github.com/Azure/ResourceModules
 - https://github.com/nix-community/awesome-nix
 - https://github.com/balena-io/docs
 - https://github.com/launchdarkly/LaunchDarkly-Docs
@@ -525,6 +707,31 @@ We collect a list of common workarounds for various websites in our [troubleshoo
 - https://github.com/analysis-tools-dev/static-analysis
 - https://github.com/analysis-tools-dev/dynamic-analysis
 - https://github.com/mre/idiomatic-rust
+- https://github.com/bencherdev/bencher
+- https://github.com/sindresorhus/execa
+- https://github.com/tldr-pages/tldr-maintenance
+- https://github.com/git-ecosystem/git-credential-manager
+- https://github.com/git/git-scm.com
+- https://github.com/OWASP/threat-dragon
+- https://github.com/oxc-project/oxc
+- https://github.com/hugsy/gef
+- https://github.com/mermaid-js/mermaid
+- https://github.com/hashicorp/consul
+- https://github.com/Unleash/unleash
+- https://github.com/fastify/fastify
+- https://github.com/nuxt/nuxt
+- https://github.com/containerd/containerd
+- https://github.com/rolldown/rolldown
+- https://github.com/rerun-io/rerun
+- https://github.com/0xAX/asm
+- https://github.com/mainmatter/100-exercises-to-learn-rust
+- https://github.com/GoogleCloudPlatform/generative-ai
+- https://github.com/DioxusLabs/dioxus
+- https://github.com/ministryofjustice/modernisation-platform
+- https://github.com/orhun/binsider
+- https://github.com/NVIDIA/aistore
+- https://github.com/gradle/gradle
+- https://github.com/forus-labs/forui
 - https://github.com/lycheeverse/lychee (yes, the lychee docs are checked with lychee 🤯)
 
 If you are using lychee for your project, **please add it here**.
@@ -532,7 +739,7 @@ If you are using lychee for your project, **please add it here**.
 ## Credits
 
 The first prototype of lychee was built in [episode 10 of Hello
-Rust](https://hello-rust.show/10/). Thanks to all Github- and Patreon sponsors
+Rust](https://hello-rust.show/10/). Thanks to all GitHub and Patreon sponsors
 for supporting the development since the beginning. Also, thanks to all the
 great contributors who have since made this project more mature.
 
@@ -540,8 +747,11 @@ great contributors who have since made this project more mature.
 
 lychee is licensed under either of
 
-- Apache License, Version 2.0, (LICENSE-APACHE or
+- Apache License, Version 2.0, ([LICENSE-APACHE](https://github.com/lycheeverse/lychee/blob/master/LICENSE-APACHE) or
   https://www.apache.org/licenses/LICENSE-2.0)
-- MIT license (LICENSE-MIT or https://opensource.org/licenses/MIT)
+- MIT license ([LICENSE-MIT](https://github.com/lycheeverse/lychee/blob/master/LICENSE-MIT) or https://opensource.org/licenses/MIT)
 
 at your option.
+
+<br><hr>
+[🔼 Back to top](#back-to-top)
